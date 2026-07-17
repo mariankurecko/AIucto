@@ -62,6 +62,169 @@ function buildEmail(params: { config: ReturnType<typeof loadMonthlyConfig>; peri
   };
 }
 
+async function resolveInvoiceRegister(params: {
+  config: ReturnType<typeof loadMonthlyConfig>;
+  services: InvoiceMonthlyServices;
+  accountingFolderId: string;
+}): Promise<{ id: string; webViewLink: string | null }> {
+  const byProperties = await params.services.drive.findFileByAppProperties(params.accountingFolderId, {
+    marianAiOs: "true",
+    accountingIdentity: params.config.accountingIdentity,
+    resourceRole: "invoice_register",
+  });
+  if (byProperties) {
+    return { id: byProperties.id, webViewLink: byProperties.webViewLink ?? null };
+  }
+
+  if (!params.services.drive.listFiles) {
+    throw new Error("Drive service does not support listFiles, and invoice register could not be resolved by appProperties.");
+  }
+
+  const candidates = await params.services.drive.listFiles(params.accountingFolderId);
+  const byName = candidates.find((file) =>
+    file.mimeType === "application/vnd.google-apps.spreadsheet"
+    && file.name === params.config.invoiceRegisterName,
+  );
+  if (!byName) {
+    throw new Error(`Invoice register '${params.config.invoiceRegisterName}' was not found in the accounting folder.`);
+  }
+
+  return { id: byName.id, webViewLink: byName.webViewLink ?? null };
+}
+
+function uploadLog(event: string, payload: Record<string, unknown>) {
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level: event.endsWith(".failed") ? "error" : "info",
+    event,
+    ...payload,
+  }));
+}
+
+function uploadParentId(params: {
+  folderTree: Awaited<ReturnType<InvoiceMonthlyServices["drive"]["ensureMonthlyFolder"]>>;
+  document: ClassifiedDocument;
+}): string {
+  return params.folderTree.approved?.id ?? params.folderTree.month.id;
+}
+
+function uploadFilename(document: ClassifiedDocument): string {
+  return document.safeStoredFilename
+    ?? document.storedFilename
+    ?? document.originalFilename
+    ?? `${document.sha256.slice(0, 12)}.${document.fileExtension ?? "bin"}`;
+}
+
+async function uploadOriginalDocuments(params: {
+  config: ReturnType<typeof loadMonthlyConfig>;
+  services: InvoiceMonthlyServices;
+  folderTree: Awaited<ReturnType<InvoiceMonthlyServices["drive"]["ensureMonthlyFolder"]>>;
+  runId: string;
+  period: string;
+  documents: ClassifiedDocument[];
+}) {
+  let uploaded = 0;
+  let reused = 0;
+  let failed = 0;
+
+  for (const document of params.documents) {
+    if (document.finalDecision !== "approved_accounting_document") {
+      document.driveFileId = null;
+      document.driveUrl = null;
+      document.driveFileUrl = null;
+      document.reviewDriveFileId = null;
+      document.reviewDriveFileUrl = null;
+      document.uploadError = null;
+      continue;
+    }
+
+    try {
+      const upload = await params.services.drive.uploadOrReuseFile!({
+        parentId: uploadParentId({ folderTree: params.folderTree, document }),
+        localPath: document.localPath,
+        filename: uploadFilename(document),
+        mimeType: document.mimeType,
+        appProperties: {
+          marianAiOs: "true",
+          accountingIdentity: params.config.accountingIdentity,
+          accountId: params.config.accountId,
+          sha256: document.sha256,
+          sourceRun: params.runId,
+          sourcePeriod: params.period,
+          packagePeriod: params.period,
+          sourceMailbox: [...new Set(document.sourceMessages.map((source) => source.mailbox))].join(","),
+          documentType: document.documentType,
+          finalDecision: document.finalDecision ?? "rejected_non_accounting",
+          resourceRole: "original_document",
+        },
+      });
+      document.driveFileId = upload.file.id;
+      document.driveUrl = upload.file.webViewLink ?? `https://drive.google.com/file/d/${upload.file.id}/view`;
+      document.driveFileUrl = document.driveUrl;
+      document.uploadError = null;
+      if (upload.created) uploaded += 1;
+      else reused += 1;
+      uploadLog("invoice.document_upload.succeeded", {
+        sha256: document.sha256,
+        filename: document.originalFilename,
+        sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
+        deduplicated: document.sourceMessages.length > 1,
+        finalDecision: document.finalDecision,
+        created: upload.created,
+        uploadTargetFolderId: uploadParentId({ folderTree: params.folderTree, document }),
+        driveFileId: document.driveFileId,
+        driveUrl: document.driveUrl,
+      });
+    } catch (error) {
+      failed += 1;
+      document.driveFileId = null;
+      document.driveUrl = null;
+      document.driveFileUrl = null;
+      document.uploadError = error instanceof Error ? error.message : String(error);
+      uploadLog("invoice.document_upload.failed", {
+        sha256: document.sha256,
+        filename: document.originalFilename,
+        sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
+        deduplicated: document.sourceMessages.length > 1,
+        finalDecision: document.finalDecision,
+        uploadError: document.uploadError,
+      });
+    }
+  }
+
+  return { uploaded, reused, failed };
+}
+
+function writeClassifiedOutputs(runDirectory: string, documents: ClassifiedDocument[]) {
+  const reviewRequired = documents.filter((document) => document.finalDecision === "review_required");
+  writeJsonAtomic(path.join(runDirectory, "classified.json"), documents, 0o600);
+  writeJsonAtomic(path.join(runDirectory, "approved.json"), documents.filter((document) => document.finalDecision === "approved_accounting_document"), 0o600);
+  writeJsonAtomic(path.join(runDirectory, "review_required.json"), reviewRequired, 0o600);
+  writeJsonAtomic(path.join(runDirectory, "review-required.json"), reviewRequired, 0o600);
+  writeJsonAtomic(path.join(runDirectory, "rejected.json"), documents.filter((document) => !["approved_accounting_document", "review_required"].includes(document.finalDecision ?? "rejected_non_accounting")), 0o600);
+}
+
+function mergeFinalizedDocuments(params: {
+  classified: ClassifiedDocument[];
+  finalized: ReturnType<typeof finalizeApprovedDocuments>;
+}): ClassifiedDocument[] {
+  const approvedBySha = new Map(params.finalized.approved.map((document) => [document.sha256, document]));
+  return params.classified.map((document) => {
+    const finalized = approvedBySha.get(document.sha256);
+    if (!finalized) return document;
+    return {
+      ...document,
+      ...finalized,
+      driveFileId: document.driveFileId ?? finalized.driveFileId ?? null,
+      driveUrl: document.driveUrl ?? finalized.driveUrl ?? finalized.driveFileUrl ?? null,
+      driveFileUrl: document.driveFileUrl ?? finalized.driveFileUrl ?? document.driveUrl ?? null,
+      reviewDriveFileId: document.reviewDriveFileId ?? finalized.reviewDriveFileId ?? null,
+      reviewDriveFileUrl: document.reviewDriveFileUrl ?? finalized.reviewDriveFileUrl ?? null,
+      uploadError: document.uploadError ?? finalized.uploadError ?? null,
+    };
+  });
+}
+
 export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: InvoiceMonthlyServices, argv = process.argv.slice(2)): Promise<{ status: PackageStatus; output: Record<string, unknown>; }> {
   const args = parseArgs(argv);
   const config = loadMonthlyConfig(projectRoot, args.account);
@@ -88,12 +251,29 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const packagesDirectory = path.join(runDirectory, "package");
   [downloadsDirectory, textDirectory, ocrDirectory, llmResultsDirectory, packagesDirectory].forEach((dir) => ensureDirectory(dir));
 
-  const incomingQuery = config.scanIncomingMail ? buildIncomingQuery(period) : null;
-  const sentQuery = config.scanSentMail ? buildSentQuery(period) : null;
+  const incomingQuery = config.scanIncomingMail ? buildIncomingQuery(period, config.ingestion.nextMonthScanDays) : null;
+  const sentQuery = config.scanSentMail ? buildSentQuery(period, config.ingestion.nextMonthScanDays) : null;
 
   if (args.dryRun) {
     return { status: "dry_run", output: { period: period.period, incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
   }
+
+  const [gmailAuthorizedEmail, driveAuthorizedEmail] = await Promise.all([
+    services.gmailRead.getProfileEmail(),
+    services.drive.getAuthorizedEmail(),
+  ]);
+  uploadLog("invoice.run.started", {
+    accountId: config.accountId,
+    accountingIdentity: config.accountingIdentity,
+    sourceMailbox: config.sourceEmail,
+    gmailConnectionId: config.googleConnectionId,
+    gmailAuthorizedEmail,
+    driveConnectionId: config.driveGoogleConnectionId,
+    driveAuthorizedEmail,
+    driveRootName: config.driveRootName,
+    driveRootFolderId: config.driveRootFolderId ?? null,
+    period: period.period,
+  });
 
   const incomingDiscovery = incomingQuery ? await discoverPeriodAttachments({ config, period, gmail: services.gmailRead, query: incomingQuery, direction: "incoming" }) : { messages: [], attachments: [] };
   currentState = updateRunState(statePath, currentState, { stage: "incoming_gmail_discovered" });
@@ -107,7 +287,16 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const merged = mergeDownloadedAttachments(downloaded);
   currentState = updateRunState(statePath, currentState, { stage: "duplicates_resolved" });
 
-  const classified = await classifyDocuments({ config: { ...config, ocrEnabled: args.ocr ? config.ocrEnabled : false }, keywordConfig, uniqueDocuments: merged.uniqueDocuments, textDirectory, ocrDirectory, llmResultsDirectory, openrouter: services.openrouter });
+  const classified = await classifyDocuments({ config: { ...config, ocrEnabled: args.ocr ? config.ocrEnabled : false }, period, keywordConfig, uniqueDocuments: merged.uniqueDocuments, textDirectory, ocrDirectory, llmResultsDirectory, openrouter: services.openrouter });
+  for (const document of classified) {
+    uploadLog("invoice.document.processed", {
+      sha256: document.sha256,
+      filename: document.originalFilename,
+      sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
+      deduplicated: document.sourceMessages.length > 1,
+      finalDecision: document.finalDecision ?? null,
+    });
+  }
   writeJsonAtomic(classifiedPath, classified, 0o600);
   currentState = updateRunState(statePath, currentState, { stage: "classified" });
 
@@ -117,70 +306,21 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const folderTree = await services.drive.ensureMonthlyFolder(config, period);
   currentState = updateRunState(statePath, currentState, { stage: "drive_pdfs_uploaded", monthlyFolderId: folderTree.month.id, monthlyFolderUrl: folderTree.month.webViewLink });
 
-  let drivePdfsCreated = 0;
-  let drivePdfsReused = 0;
-  const allDocumentsForManifest: ClassifiedDocument[] = [];
-
-  for (const document of finalDocuments.approved) {
-    const finalDecision = document.finalDecision ?? "approved_accounting_document";
-    const upload = services.drive.uploadOrReusePdf
-      ? await services.drive.uploadOrReusePdf({
-        parentId: folderTree.approved?.id ?? folderTree.month.id,
-        localPath: document.localPath,
-        filename: document.safeStoredFilename,
-        appProperties: {
-          marianAiOs: "true",
-          accountId: config.accountId,
-          sha256: document.sha256,
-          sourceRun: currentState.runId,
-          sourcePeriod: period.period,
-          packagePeriod: period.period,
-          documentType: document.documentType,
-          finalDecision,
-        },
-      })
-      : await services.drive.uploadOrReuseFile!({
-        parentId: folderTree.approved?.id ?? folderTree.month.id,
-        localPath: document.localPath,
-        filename: document.safeStoredFilename,
-        mimeType: document.mimeType,
-        appProperties: {
-          marianAiOs: "true",
-          accountId: config.accountId,
-          sha256: document.sha256,
-          sourceRun: currentState.runId,
-          sourcePeriod: period.period,
-          packagePeriod: period.period,
-          documentType: document.documentType,
-          finalDecision,
-        },
-      });
-    if (upload.created) drivePdfsCreated += 1; else drivePdfsReused += 1;
-    allDocumentsForManifest.push({ ...document, driveFileId: upload.file.id, driveFileUrl: upload.file.webViewLink });
-  }
-
-  for (const document of finalDocuments.reviewRequired) {
-    const filename = document.safeStoredFilename ?? `${document.sha256.slice(0, 8)}.${document.fileExtension ?? "bin"}`;
-    const finalDecision = document.finalDecision ?? "review_required";
-    const upload = await services.drive.uploadOrReuseFile!({
-      parentId: folderTree.review?.id ?? folderTree.month.id,
-      localPath: document.localPath,
-      filename,
-      mimeType: document.mimeType,
-      appProperties: {
-        marianAiOs: "true",
-        accountId: config.accountId,
-        sha256: document.sha256,
-        sourceRun: currentState.runId,
-        packagePeriod: period.period,
-        documentType: document.documentType,
-        finalDecision,
-      },
-    });
-    allDocumentsForManifest.push({ ...document, reviewDriveFileId: upload.file.id, reviewDriveFileUrl: upload.file.webViewLink, safeStoredFilename: filename, storedFilename: filename });
-  }
-
-  allDocumentsForManifest.push(...finalDocuments.rejected);
+  const uploadStats = await uploadOriginalDocuments({
+    config,
+    services,
+    folderTree,
+    runId: currentState.runId,
+    period: period.period,
+    documents: classified,
+  });
+  let drivePdfsCreated = uploadStats.uploaded;
+  let drivePdfsReused = uploadStats.reused;
+  const allDocumentsForManifest: ClassifiedDocument[] = mergeFinalizedDocuments({
+    classified,
+    finalized: finalDocuments,
+  });
+  writeClassifiedOutputs(runDirectory, allDocumentsForManifest);
 
   const manifest = buildManifest({ config, period: period.period, duplicateCount: merged.duplicateCount, excludedCount: finalDocuments.excludedCount, documents: allDocumentsForManifest, generatedAt: currentState.startedAt });
   writeJsonAtomic(manifestPath, manifest, 0o600);
@@ -196,13 +336,13 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
     parentId: folderTree.month.id,
     filename: "manifest.json",
     localPath: manifestPath,
-    appProperties: { marianAiOs: "true", accountId: config.accountId, resourceRole: "monthly_accounting_manifest", packagePeriod: period.period, packageVersion: String(config.packageVersion), documentCount: String(manifest.documentCount), sourceRun: currentState.runId },
+    appProperties: { marianAiOs: "true", accountingIdentity: config.accountingIdentity, accountId: config.accountId, resourceRole: "monthly_accounting_manifest", packagePeriod: period.period, packageVersion: String(config.packageVersion), documentCount: String(manifest.documentCount), sourceRun: currentState.runId },
   });
   await services.drive.uploadOrReplaceJson({
     parentId: folderTree.month.id,
     filename: "classification-summary.json",
     localPath: classificationSummaryPath,
-    appProperties: { marianAiOs: "true", accountId: config.accountId, resourceRole: "monthly_classification_summary", packagePeriod: period.period, packageVersion: String(config.packageVersion), sourceRun: currentState.runId },
+    appProperties: { marianAiOs: "true", accountingIdentity: config.accountingIdentity, accountId: config.accountId, resourceRole: "monthly_classification_summary", packagePeriod: period.period, packageVersion: String(config.packageVersion), sourceRun: currentState.runId },
   });
   currentState = updateRunState(statePath, currentState, { stage: "manifest_uploaded", manifestDriveFileId: manifestUpload.id, manifestDriveUrl: manifestUpload.webViewLink });
 
@@ -228,16 +368,19 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
     filename: zipName,
     localPath: zipPath,
     mimeType: "application/zip",
-    appProperties: { marianAiOs: "true", accountId: config.accountId, resourceRole: "monthly_accounting_zip", packagePeriod: period.period, packageVersion: String(config.packageVersion), zipSha256: zipResult.sha256, documentCount: String(manifest.approvedDocumentCount), sourceRun: currentState.runId },
+    appProperties: { marianAiOs: "true", accountingIdentity: config.accountingIdentity, accountId: config.accountId, resourceRole: "monthly_accounting_zip", packagePeriod: period.period, packageVersion: String(config.packageVersion), zipSha256: zipResult.sha256, documentCount: String(manifest.approvedDocumentCount), sourceRun: currentState.runId },
   });
   currentState = updateRunState(statePath, currentState, { stage: "zip_uploaded", zipDriveFileId: zipUpload.id, zipDriveUrl: zipUpload.webViewLink });
 
-  const googleResourcesPath = path.join(projectRoot, "data", "google-resources", `${config.accountId}.json`);
-  const googleResources = readJsonFile<any>(googleResourcesPath);
-  const invoiceRegisterUrl = googleResources.resources.invoice_register.webViewLink;
-  await services.sheets.ensureDocumentsSheet(googleResources.resources.invoice_register.id);
+  const invoiceRegister = await resolveInvoiceRegister({
+    config,
+    services,
+    accountingFolderId: folderTree.accounting.id,
+  });
+  const invoiceRegisterUrl = invoiceRegister.webViewLink ?? "";
+  await services.sheets.ensureDocumentsSheet(invoiceRegister.id);
   const sheetResult = await services.sheets.upsertDocuments({
-    spreadsheetId: googleResources.resources.invoice_register.id,
+    spreadsheetId: invoiceRegister.id,
     sheetName: "Documents",
     monthlyFolderUrl: folderTree.month.webViewLink ?? "",
     zipPackageUrl: zipUpload.webViewLink ?? "",
@@ -379,6 +522,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       recipient: config.accountantEmail,
       preparedEmailPath,
       emailSent: false,
+      uploadFailedCount: uploadStats.failed,
       approvedCount: finalDocuments.approved.length,
       reviewCount: finalDocuments.reviewRequired.length,
       rejectedCount: finalDocuments.rejected.length,

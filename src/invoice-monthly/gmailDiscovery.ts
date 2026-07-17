@@ -9,6 +9,7 @@ import { buildStoredFilename, ensureUniqueStoredFilenames } from "./filename.js"
 import { ensureDirectory, safeFileExtension, sha256Hex, validateSourceFilename, writeFileAtomic } from "./fs.js";
 import { normalizeCompact, normalizeForMatching } from "./textNormalization.js";
 import { isInternalDateInPeriod } from "./period.js";
+import { applyPeriodValidation } from "./periodValidation.js";
 import {
   AttachmentSourceRef,
   ClassifiedDocument,
@@ -241,14 +242,14 @@ function detectVendor(text: string, supplier: ExtractedParty): string | null {
   return explicit?.trim() ?? null;
 }
 
-function classifyReceiptCategory(text: string, vendor: string | null): "fuel" | "meals" | "software" | "other" {
+function classifyReceiptCategory(text: string, vendor: string | null): "fuel" | "software" | "services" | "other" {
   const normalized = normalizeForMatching(text);
   const vendorNormalized = normalizeForMatching(vendor ?? "");
   if (FUEL_VENDORS.some((item) => vendorNormalized.includes(item)) || FUEL_KEYWORDS.some((item) => normalized.includes(normalizeForMatching(item)))) {
     return "fuel";
   }
   if (MEAL_KEYWORDS.some((item) => normalized.includes(normalizeForMatching(item)))) {
-    return "meals";
+    return "services";
   }
   if (SOFTWARE_KEYWORDS.some((item) => normalized.includes(normalizeForMatching(item)))) {
     return "software";
@@ -714,6 +715,7 @@ export function mergeDownloadedAttachments(downloaded: DownloadedAttachment[]): 
 
 export async function classifyDocuments(params: {
   config: MonthlyWorkflowConfig;
+  period: PeriodInfo;
   keywordConfig: KeywordConfig;
   uniqueDocuments: ReturnType<typeof mergeDownloadedAttachments>["uniqueDocuments"];
   textDirectory: string;
@@ -761,6 +763,7 @@ export async function classifyDocuments(params: {
       keywordConfig: params.keywordConfig,
       extraction,
     });
+    applyPeriodValidation(classified, params.period, params.config);
     classified.sourceMessages = item.sourceMessages;
     classified.duplicateOfSha256 = item.duplicateOfSha256;
     results.push(classified);

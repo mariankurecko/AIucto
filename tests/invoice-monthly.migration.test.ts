@@ -120,7 +120,7 @@ test("invoice without Equisix identity requires review", () => {
   const result = classify("Invoice 2026-01\nSupplier: Another Supplier s.r.o.\nCustomer: Other Company s.r.o.\nIssue Date: 2026-06-10\nTotal: 100.00 EUR\nVAT: 20.00\nIBAN: SK1234567890123456789012");
   assert.equal(result.documentType, "invoice");
   assert.equal(result.finalDecision, "review_required");
-  assert.equal(result.localDecisionReason, "missing_data");
+  assert.equal(result.localDecisionReason, "invoice_unclear_role_requires_review");
   assert.equal(result.invoiceMatchType, "no_match");
   assert.equal(result.decisionConfidence, 0.5);
 });
@@ -130,7 +130,7 @@ test("incoming invoice with Equisix as customer is approved", () => {
   assert.equal(result.documentType, "invoice");
   assert.equal(result.finalDecision, "approved_accounting_document");
   assert.equal(result.invoiceMatchType, "customer_match");
-  assert.equal(result.decisionConfidence, 0.8);
+  assert.equal(result.decisionConfidence, 0.92);
   assert.equal(result.transactionType, "EXPENSE");
 });
 
@@ -139,7 +139,7 @@ test("outgoing invoice with Equisix as supplier is approved", () => {
   assert.equal(result.documentType, "invoice");
   assert.equal(result.finalDecision, "approved_accounting_document");
   assert.equal(result.invoiceMatchType, "supplier_match");
-  assert.equal(result.decisionConfidence, 0.8);
+  assert.equal(result.decisionConfidence, 0.92);
   assert.equal(result.transactionType, "INCOME");
 });
 
@@ -155,7 +155,7 @@ test("invoice with tax identity only is approved", () => {
 test("invoice with both supplier and customer unknown is rejected", () => {
   const result = classify("Invoice\nIssue Date: 2026-06-10\nTotal: 100.00 EUR\nVAT: 20.00");
   assert.equal(result.documentType, "invoice");
-  assert.equal(result.finalDecision, "rejected_non_accounting");
+  assert.equal(result.finalDecision, "rejected_wrong_company");
   assert.equal(result.invoiceMatchType, "no_match");
 });
 
@@ -174,8 +174,8 @@ test("receipt without VISA 8627 requires review", () => {
   assert.ok((result.documentTypeConfidence ?? 0) >= 80);
   assert.equal(result.finalDecision, "review_required");
   assert.equal(result.companyRelation, "business_expense_candidate");
-  assert.equal(result.localDecisionReason, "missing_data");
-  assert.equal(result.decisionConfidence, 0.5);
+  assert.equal(result.localDecisionReason, "receipt_requires_review");
+  assert.equal(result.decisionConfidence, 0.55);
 });
 
 test("VISA 8627 receipt exception", () => {
@@ -184,8 +184,8 @@ test("VISA 8627 receipt exception", () => {
   assert.equal(result.detectionReason, "receipt_keyword");
   assert.equal(result.finalDecision, "approved_accounting_document");
   assert.equal(result.companyRelation, "business_expense_candidate");
-  assert.equal(result.localDecisionReason, "visa_match");
-  assert.equal(result.invoiceMatchType, "no_match");
+  assert.equal(result.localDecisionReason, "receipt_rule_visa_match");
+  assert.equal(result.invoiceMatchType, "receipt_rule");
   assert.equal(result.decisionConfidence, 0.9);
   assert.equal(result.transactionType, "EXPENSE");
   assert.equal(result.expenseCategory, "other");
@@ -215,7 +215,7 @@ test("short unstructured OCR scan becomes receipt", () => {
 test("ambiguous image scan stays other and review required", () => {
   const result = classify("random scanned text 12345 67890 some words no document sections or labels", { isPdf: false, isImage: true, fileExtension: "jpg", normalizedFilename: "ambiguous.jpg", source: { messageId: "m1", threadId: "t1", direction: "incoming", mailbox: "hello@equisix.com", from: "sender@example.com", recipients: ["hello@equisix.com"], subject: "scan", timestampIso: "2026-06-10T00:00:00.000Z", localDate: "2026-06-10", attachmentId: "a1", originalFilename: "ambiguous.jpg", mimeType: "image/jpeg", sizeBytes: 100 } }, baseExtraction({ extractionStatus: "ocr_succeeded", extractionMethod: "ocr_image", ocr: { provider: "local_tesseract", language: "slk+eng", quality: "medium", outputTextPath: "/tmp/ocr.txt", warnings: [], available: true } }));
   assert.equal(result.documentType, "other");
-  assert.equal(result.finalDecision, "review_required");
+  assert.equal(result.finalDecision, "rejected_non_accounting");
   assert.ok((result.documentTypeConfidence ?? 0) <= 50);
 });
 
@@ -230,7 +230,7 @@ test("scanned invoice OCR provenance", () => {
   assert.ok((result.documentTypeConfidence ?? 0) >= 85);
   assert.equal(result.detectionReason, "invoice_keyword");
   assert.equal(result.finalDecision, "approved_accounting_document");
-  assert.equal(result.localDecisionReason, "invoice_match");
+  assert.equal(result.localDecisionReason, "customer_match");
   assert.equal(result.invoiceMatchType, "customer_match");
 });
 

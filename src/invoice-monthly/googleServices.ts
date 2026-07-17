@@ -113,7 +113,7 @@ export function createGmailReadService(config: MonthlyWorkflowConfig): GmailRead
 
 export function createDriveService(config: MonthlyWorkflowConfig): DriveService {
   const credentials = loadGoogleClientCredentials();
-  const token = loadGoogleTokenOrThrow(config.googleConnectionId, "drive_sheets").record;
+  const token = loadGoogleTokenOrThrow(config.driveGoogleConnectionId, "drive_sheets").record;
   const auth = oauthClient(credentials, token);
   const drive = google.drive({ version: "v3", auth });
 
@@ -127,6 +127,10 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
     const files = response.data.files ?? [];
     if (files.length > 1) throw new Error(`Drive ambiguity for query: ${query}`);
     return files[0] ? recordFromDrive(files[0]) : null;
+  }
+
+  async function findSingle(query: string): Promise<DriveFileRecord | null> {
+    return listSingle(query);
   }
 
   async function ensureFolder(name: string, parentId: string, appProperties: Record<string, string>): Promise<DriveFileRecord> {
@@ -146,17 +150,20 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
       return about.data.user?.emailAddress ?? "";
     },
     async ensureMonthlyFolder(monthlyConfig, period) {
-      const rootQuery = [`name = '${escapeDrive(monthlyConfig.driveRootName)}'`, "mimeType = 'application/vnd.google-apps.folder'", "trashed = false"].join(" and ");
-      const accountRoot = await listSingle(rootQuery);
+      const accountRoot = monthlyConfig.driveRootFolderId
+        ? await this.getFile?.(monthlyConfig.driveRootFolderId) ?? null
+        : await listSingle([`name = '${escapeDrive(monthlyConfig.driveRootName)}'`, "mimeType = 'application/vnd.google-apps.folder'", "trashed = false"].join(" and "));
       if (!accountRoot) throw new Error(`Drive root '${monthlyConfig.driveRootName}' was not found.`);
-      const accounting = await ensureFolder(monthlyConfig.driveAccountingFolder, accountRoot.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "accounting_folder" });
-      const invoices = await ensureFolder(monthlyConfig.driveInvoicesFolder, accounting.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "invoices_folder" });
-      const year = await ensureFolder(String(period.year), invoices.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "year_folder", packagePeriod: period.period });
-      const month = await ensureFolder(String(period.month).padStart(2, "0"), year.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "month_folder", packagePeriod: period.period });
-      const approved = await ensureFolder("Approved Documents", month.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "approved_documents", packagePeriod: period.period });
-      const review = await ensureFolder("Review Required", month.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "review_required", packagePeriod: period.period });
-      const previousRunUnverified = await ensureFolder("Previous Run - Unverified", month.id, { marianAiOs: "true", accountId: monthlyConfig.accountId, resourceRole: "previous_run_unverified", packagePeriod: period.period });
-      return { accountRoot, accounting, invoices, year, month, approved, review, previousRunUnverified } satisfies DriveFolderTree;
+      const accountingAppProperties = { marianAiOs: "true", accountingIdentity: monthlyConfig.accountingIdentity };
+      const accounting = await ensureFolder(monthlyConfig.driveAccountingFolder, accountRoot.id, { ...accountingAppProperties, resourceRole: "accounting_folder" });
+      const invoices = await ensureFolder(monthlyConfig.driveInvoicesFolder, accounting.id, { ...accountingAppProperties, resourceRole: "invoices_folder" });
+      const year = await ensureFolder(String(period.year), invoices.id, { ...accountingAppProperties, resourceRole: "year_folder", packagePeriod: period.period });
+      const month = await ensureFolder(String(period.month).padStart(2, "0"), year.id, { ...accountingAppProperties, resourceRole: "month_folder", packagePeriod: period.period });
+      const approved = await ensureFolder("Approved Documents", month.id, { ...accountingAppProperties, resourceRole: "approved_documents", packagePeriod: period.period });
+      const review = await ensureFolder("Review Required", month.id, { ...accountingAppProperties, resourceRole: "review_required", packagePeriod: period.period });
+      const rejected = await ensureFolder("Rejected Documents", month.id, { ...accountingAppProperties, resourceRole: "rejected_documents", packagePeriod: period.period });
+      const previousRunUnverified = await ensureFolder("Previous Run - Unverified", month.id, { ...accountingAppProperties, resourceRole: "previous_run_unverified", packagePeriod: period.period });
+      return { accountRoot, accounting, invoices, year, month, approved, review, rejected, previousRunUnverified } satisfies DriveFolderTree;
     },
     async ensureChildFolder(name, parentId, appProperties) {
       return ensureFolder(name, parentId, appProperties);
@@ -164,7 +171,12 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
     async findFileByAppProperties(parentId, appProperties) {
       const propertyQuery = Object.entries(appProperties).map(([key, value]) => `appProperties has { key='${escapeDrive(key)}' and value='${escapeDrive(value)}' }`).join(" and ");
       const query = [`'${escapeDrive(parentId)}' in parents`, "trashed = false", propertyQuery].join(" and ");
-      return listSingle(query);
+      return findSingle(query);
+    },
+    async findFileByAppPropertiesGlobal(appProperties) {
+      const propertyQuery = Object.entries(appProperties).map(([key, value]) => `appProperties has { key='${escapeDrive(key)}' and value='${escapeDrive(value)}' }`).join(" and ");
+      const query = ["trashed = false", propertyQuery].join(" and ");
+      return findSingle(query);
     },
     async listFiles(parentId) {
       const response = await drive.files.list({
@@ -196,8 +208,16 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
       });
       return recordFromDrive(updated.data);
     },
+    async deleteFile(fileId) {
+      await drive.files.delete({ fileId });
+    },
     async uploadOrReuseFile(input) {
-      const existing = await this.findFileByAppProperties(input.parentId, { marianAiOs: "true", sha256: input.appProperties.sha256, packagePeriod: input.appProperties.packagePeriod });
+      const existing = await this.findFileByAppPropertiesGlobal?.({
+        marianAiOs: "true",
+        accountingIdentity: input.appProperties.accountingIdentity,
+        sha256: input.appProperties.sha256,
+        resourceRole: input.appProperties.resourceRole,
+      });
       if (existing) return { file: existing, created: false };
       const created = await drive.files.create({
         requestBody: { name: input.filename, parents: [input.parentId], appProperties: input.appProperties },
@@ -256,7 +276,7 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
 
 export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId: string): SheetsService {
   const credentials = loadGoogleClientCredentials();
-  const token = loadGoogleTokenOrThrow(config.googleConnectionId, "drive_sheets").record;
+  const token = loadGoogleTokenOrThrow(config.driveGoogleConnectionId, "drive_sheets").record;
   const auth = oauthClient(credentials, token);
   const sheets = google.sheets({ version: "v4", auth });
 
@@ -270,22 +290,26 @@ export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId
   ];
 
   return {
-    async ensureDocumentsSheet() {
-      const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+    async ensureDocumentsSheet(requestSpreadsheetId) {
+      const targetSpreadsheetId = requestSpreadsheetId || spreadsheetId;
+      if (!targetSpreadsheetId) throw new Error("Missing spreadsheetId for ensureDocumentsSheet.");
+      const metadata = await sheets.spreadsheets.get({ spreadsheetId: targetSpreadsheetId });
       const existing = metadata.data.sheets?.find((sheet) => sheet.properties?.title === "Documents");
       if (!existing) {
         await sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
+          spreadsheetId: targetSpreadsheetId,
           requestBody: { requests: [{ addSheet: { properties: { title: "Documents", gridProperties: { frozenRowCount: 1 } } } }] },
         });
       }
-      const firstRow = await sheets.spreadsheets.values.get({ spreadsheetId, range: "Documents!1:1" });
+      const firstRow = await sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!1:1" });
       if ((firstRow.data.values?.[0] ?? []).length === 0) {
-        await sheets.spreadsheets.values.update({ spreadsheetId, range: "Documents!A1", valueInputOption: "RAW", requestBody: { values: [headers] } });
+        await sheets.spreadsheets.values.update({ spreadsheetId: targetSpreadsheetId, range: "Documents!A1", valueInputOption: "RAW", requestBody: { values: [headers] } });
       }
     },
     async upsertDocuments(params) {
-      const existing = await sheets.spreadsheets.values.get({ spreadsheetId, range: "Documents!A:AZ" });
+      const targetSpreadsheetId = params.spreadsheetId || spreadsheetId;
+      if (!targetSpreadsheetId) throw new Error("Missing spreadsheetId for upsertDocuments.");
+      const existing = await sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!A:AZ" });
       const rows = existing.data.values ?? [];
       const shaIndex = headers.indexOf("SHA-256");
       const existingRows = new Map<string, number>();
@@ -357,10 +381,10 @@ export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId
       }
 
       for (const update of updates) {
-        await sheets.spreadsheets.values.update({ spreadsheetId, range: `Documents!A${update.rowNumber}`, valueInputOption: "RAW", requestBody: { values: [update.values] } });
+        await sheets.spreadsheets.values.update({ spreadsheetId: targetSpreadsheetId, range: `Documents!A${update.rowNumber}`, valueInputOption: "RAW", requestBody: { values: [update.values] } });
       }
       if (appends.length > 0) {
-        await sheets.spreadsheets.values.append({ spreadsheetId, range: "Documents!A:AZ", valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: appends } });
+        await sheets.spreadsheets.values.append({ spreadsheetId: targetSpreadsheetId, range: "Documents!A:AZ", valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: appends } });
       }
       return { appended: appends.length, updated: updates.length };
     },

@@ -15,6 +15,7 @@
     "invoice:monthly": "node --import tsx apps/cli/src/invoice-monthly.ts",
     "invoice:monthly-second-pass": "node --import tsx apps/cli/src/invoice-monthly-second-pass.ts",
     "invoice:cleanup-month": "node --import tsx apps/cli/src/invoice-cleanup-month.ts",
+    "invoice:period-cleanup": "node --import tsx src/invoice-monthly/strictPeriodCleanup.ts",
     "google:authorize:invoice-core": "node --import tsx src/googleAuthorizeConnection.ts --purpose invoice_core",
     "google:authorize:gmail-send": "node --import tsx src/googleAuthorizeConnection.ts --purpose gmail_send",
     "google:authorize:invoice": "node --import tsx src/googleBootstrapAuthorize.ts"

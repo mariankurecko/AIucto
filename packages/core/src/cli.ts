@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { createDriveService, createGmailReadService, createGmailSendService, createSheetsService } from "../../google/src/index.js";
 import { loadMonthlyConfig } from "../../../src/invoice-monthly/config.js";
 import { createOpenRouterService } from "../../../src/invoice-monthly/openRouterExtraction.js";
@@ -20,8 +19,6 @@ export async function runInvoiceMonthlyCli(projectRoot: string, argv = process.a
     openrouter: createOpenRouterService(),
     gmailSend: createGmailSendService(config),
   };
-  const googleResources = JSON.parse(fs.readFileSync(`${projectRoot}/data/google-resources/${config.accountId}.json`, "utf8"));
-  services.sheets = createSheetsService(config, googleResources.resources.invoice_register.id);
   const result = await runInvoiceMonthlyWorkflow(projectRoot, services, argv);
   console.log(JSON.stringify(result, null, 2));
 }

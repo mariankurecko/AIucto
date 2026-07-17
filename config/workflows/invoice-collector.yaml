@@ -7,6 +7,8 @@ workflow:
   email_forward_enabled: false
   supported_attachment_types:
     - application/pdf
+    - image/jpeg
+    - image/png
   lookback_days_default: 30
   ocr_enabled: false
   audit_enabled: true

@@ -125,6 +125,7 @@ export type InvoiceMatchType =
   | "customer_match"
   | "supplier_match"
   | "identity_match"
+  | "receipt_rule"
   | "no_match";
 
 export type TransactionType =
@@ -133,8 +134,8 @@ export type TransactionType =
 
 export type ExpenseCategory =
   | "fuel"
-  | "meals"
   | "software"
+  | "services"
   | "other";
 
 export type ApprovalStatus =
@@ -205,8 +206,20 @@ export type ClassificationRulesConfig = {
   shortReceiptTextThreshold: number;
 };
 
+export type PeriodValidationConfig = {
+  enabled: boolean;
+  strict: boolean;
+  allowFallbackToDeliveryDate: boolean;
+  driveCleanupAction?: "move_to_out_of_period" | "delete";
+};
+
+export type IngestionConfig = {
+  nextMonthScanDays: number;
+};
+
 export type MonthlyWorkflowConfig = {
   accountId: string;
+  accountingIdentity: string;
   sourceEmail: string;
   senderEmail: string;
   accountantEmail: string;
@@ -214,11 +227,13 @@ export type MonthlyWorkflowConfig = {
   scheduleDay: number;
   scheduleTime: string;
   googleConnectionId: string;
+  driveGoogleConnectionId: string;
   scanIncomingMail: boolean;
   scanSentMail: boolean;
   accountingKeywordsFile: string;
   openrouterModel: string;
   driveRootName: string;
+  driveRootFolderId?: string | null;
   driveAccountingFolder: string;
   driveInvoicesFolder: string;
   invoiceRegisterName: string;
@@ -237,6 +252,8 @@ export type MonthlyWorkflowConfig = {
   ocrLanguages?: string[];
   allowExternalModelsForDocuments?: boolean;
   classification?: ClassificationRulesConfig;
+  periodValidation: PeriodValidationConfig;
+  ingestion: IngestionConfig;
 };
 
 export type PeriodInfo = {
@@ -473,6 +490,9 @@ export type ClassifiedDocument = {
   documentNumber?: string | null;
   issueDate?: string | null;
   taxableSupplyDate?: string | null;
+  invoiceDate?: string | null;
+  deliveryDate?: string | null;
+  detectedPeriod?: string | null;
   dueDate?: string | null;
   amounts?: AmountFields;
   subtotalAmount?: string | null;
@@ -493,9 +513,11 @@ export type ClassifiedDocument = {
   storedFilename?: string | null;
   duplicateOfSha256?: string | null;
   driveFileId?: string | null;
+  driveUrl?: string | null;
   driveFileUrl?: string | null;
   reviewDriveFileId?: string | null;
   reviewDriveFileUrl?: string | null;
+  uploadError?: string | null;
   zipIncluded?: boolean;
   ocrUsed?: boolean;
   ocrLanguage?: string | null;
@@ -524,7 +546,7 @@ export type CleanupMoveRecord = {
   cleanupAction: "move";
   cleanupTimestamp: string;
   sha256: string | null;
-  reason: "reclassification_with_ocr_and_company_validation";
+  reason: "reclassification_with_ocr_and_company_validation" | "out_of_period";
 };
 
 export type RunState = {
@@ -636,6 +658,9 @@ export type ManifestDocumentRecord = {
   supplier: ExtractedParty;
   customer: ExtractedParty;
   document: DocumentFields;
+  invoiceDate?: string | null;
+  deliveryDate?: string | null;
+  detectedPeriod?: string | null;
   amounts: AmountFields;
   banking: BankingFields;
   documentTypeConfidence: number;
@@ -646,7 +671,9 @@ export type ManifestDocumentRecord = {
   rejectionReasons: string[];
   warnings: string[];
   driveFileId: string | null;
+  driveUrl: string | null;
   driveFileUrl: string | null;
+  uploadError: string | null;
   zipIncluded: boolean;
   matchedAccountingKeywords?: string[];
 };
@@ -732,6 +759,7 @@ export type DriveFolderTree = {
   month: DriveFileRecord;
   approved?: DriveFileRecord;
   review?: DriveFileRecord;
+  rejected?: DriveFileRecord;
   previousRunUnverified?: DriveFileRecord;
 };
 
@@ -740,9 +768,11 @@ export type DriveService = {
   ensureMonthlyFolder(config: MonthlyWorkflowConfig, period: PeriodInfo): Promise<DriveFolderTree>;
   ensureChildFolder?(name: string, parentId: string, appProperties: Record<string, string>): Promise<DriveFileRecord>;
   findFileByAppProperties(parentId: string, appProperties: Record<string, string>): Promise<DriveFileRecord | null>;
+  findFileByAppPropertiesGlobal?(appProperties: Record<string, string>): Promise<DriveFileRecord | null>;
   listFiles?(parentId: string): Promise<DriveFileRecord[]>;
   getFile?(fileId: string): Promise<DriveFileRecord | null>;
   moveFile?(fileId: string, addParentId: string, removeParentIds: string[]): Promise<DriveFileRecord>;
+  deleteFile?(fileId: string): Promise<void>;
   uploadOrReusePdf?(input: {
     parentId: string;
     localPath: string;

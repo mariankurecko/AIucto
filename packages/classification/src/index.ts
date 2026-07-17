@@ -195,14 +195,21 @@ function computeDecisionConfidence(input: {
   invoiceMatchType: InvoiceMatchType;
   partialNameMatch: boolean;
   visaMatched: boolean;
+  vendorReceiptMatched: boolean;
+  rejected: boolean;
 }): number {
+  if (input.rejected) return 0.95;
   if (input.isInvoice) {
     if (input.invoiceMatchType === "identity_match") return 0.97;
-    if (input.invoiceMatchType === "customer_match" || input.invoiceMatchType === "supplier_match") return 0.8;
+    if (input.invoiceMatchType === "customer_match" || input.invoiceMatchType === "supplier_match") return 0.92;
     if (input.partialNameMatch) return 0.5;
-    return 0.5;
+    return 0.4;
   }
-  if (input.isReceipt) return input.visaMatched ? 0.9 : 0.5;
+  if (input.isReceipt) {
+    if (input.visaMatched) return 0.9;
+    if (input.vendorReceiptMatched) return 0.82;
+    return 0.55;
+  }
   return 0.3;
 }
 
@@ -218,14 +225,43 @@ function detectVendor(text: string, supplier: ExtractedParty, config: MonthlyWor
   return explicit?.trim() ?? null;
 }
 
-function classifyReceiptCategory(text: string, vendor: string | null, config: MonthlyWorkflowConfig): "fuel" | "meals" | "software" | "other" {
+function classifyReceiptCategory(text: string, vendor: string | null, config: MonthlyWorkflowConfig): "fuel" | "software" | "services" | "other" {
   const normalized = normalizeForMatching(text);
   const vendorNormalized = normalizeForMatching(vendor ?? "");
   const rules = classificationRules(config);
   if (rules.fuelVendors.some((item) => vendorNormalized.includes(normalizeForMatching(item)))
     || rules.fuelKeywords.some((item) => normalized.includes(normalizeForMatching(item)))) return "fuel";
-  if (rules.mealKeywords.some((item) => normalized.includes(normalizeForMatching(item)))) return "meals";
   if (rules.softwareKeywords.some((item) => normalized.includes(normalizeForMatching(item)))) return "software";
+  if (rules.mealKeywords.some((item) => normalized.includes(normalizeForMatching(item)))) return "services";
+  return "other";
+}
+
+function classifyDocumentCategory(params: {
+  text: string;
+  vendor: string | null;
+  config: MonthlyWorkflowConfig;
+  isReceipt: boolean;
+}): ClassifiedDocument["expenseCategory"] | undefined {
+  const normalized = normalizeForMatching(params.text);
+  const vendorNormalized = normalizeForMatching(params.vendor ?? "");
+  const rules = classificationRules(params.config);
+
+  if (params.isReceipt) {
+    return classifyReceiptCategory(params.text, params.vendor, params.config);
+  }
+
+  if (
+    rules.fuelVendors.some((item) => vendorNormalized.includes(normalizeForMatching(item)))
+    || rules.fuelKeywords.some((item) => normalized.includes(normalizeForMatching(item)))
+  ) {
+    return "fuel";
+  }
+  if (rules.softwareKeywords.some((item) => normalized.includes(normalizeForMatching(item)))) {
+    return "software";
+  }
+  if (!params.isReceipt && /developer|insurance|consult|service|support|maintenance|agency|accounting|legal/i.test(params.text)) {
+    return "services";
+  }
   return "other";
 }
 
@@ -280,6 +316,9 @@ export function buildClassification(params: {
   const companyRelation = inferRelation(identityMatches, supplier, customer);
   const normalized = normalizeForMatching(params.text);
   const compact = normalizeCompact(params.text);
+  const invoiceDate = parseDate(params.text);
+  const deliveryDate = firstMatch(params.text, /\b(?:datum dodania|taxable supply date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i);
+  const detectedPeriod = (invoiceDate ?? deliveryDate)?.slice(0, 7) ?? null;
   const totalAmount = firstMatch(params.text, /\b(?:total|spolu|na uhradu)\s*[:\-]?\s*([0-9]+[.,][0-9]{2})/i);
   const currency = firstMatch(params.text, /\b(EUR|CZK|USD|GBP|HUF|PLN)\b/i)?.toUpperCase() ?? null;
   const receiptNumber = firstMatch(params.text, /\b(?:receipt no|receipt number|doklad c|doklad č|pokladna)\s*[:\-]?\s*([a-z0-9\-\/]+)/i);
@@ -297,7 +336,16 @@ export function buildClassification(params: {
   const supplierUnknown = isUnknownParty(supplier);
   const customerUnknown = isUnknownParty(customer);
   const vendor = detectVendor(params.text, supplier, params.config);
-  const expenseCategory = isReceipt ? classifyReceiptCategory(params.text, vendor, params.config) : undefined;
+  const expenseCategory = classifyDocumentCategory({
+    text: params.text,
+    vendor,
+    config: params.config,
+    isReceipt,
+  });
+  const vendorReceiptMatched = isReceipt && (
+    rules.fuelVendors.some((item) => normalizeForMatching(vendor ?? "").includes(normalizeForMatching(item)))
+    || rules.fuelKeywords.some((item) => normalized.includes(normalizeForMatching(item)))
+  );
 
   let finalDecision: ClassifiedDocument["finalDecision"] = "rejected_non_accounting";
   let invoiceMatchType: InvoiceMatchType = "no_match";
@@ -322,15 +370,17 @@ export function buildClassification(params: {
     companyRelationConfidence = 90;
     resolvedCompanyRelation = "business_expense_candidate";
     transactionType = "EXPENSE";
-    if (visaMatched) {
+    if (vendorReceiptMatched || visaMatched) {
       overallConfidence = 91;
       finalDecision = "approved_accounting_document";
-      decisionReason = "visa_match";
-      validationReasons.push("visa_match");
+      invoiceMatchType = "receipt_rule";
+      decisionReason = vendorReceiptMatched ? "receipt_rule_vendor_match" : "receipt_rule_visa_match";
+      validationReasons.push("receipt_rule");
     } else {
       overallConfidence = 60;
       finalDecision = "review_required";
-      warnings.push("missing_data");
+      decisionReason = "receipt_requires_review";
+      warnings.push("missing_business_expense_evidence");
     }
   } else if (isInvoice) {
     if (customerStrongMatch) {
@@ -351,18 +401,21 @@ export function buildClassification(params: {
     overallConfidence = Math.min(99, Math.round((documentTypeConfidence + companyRelationConfidence) / 2));
     if (customerStrongMatch || supplierStrongMatch || identityMatched) {
       finalDecision = "approved_accounting_document";
-      decisionReason = "invoice_match";
-      validationReasons.push("invoice_match");
+      decisionReason = invoiceMatchType;
+      validationReasons.push(invoiceMatchType);
     } else if (supplierUnknown && customerUnknown) {
-      finalDecision = "rejected_non_accounting";
-      rejectionReasons.push("missing_data");
+      finalDecision = "rejected_wrong_company";
+      decisionReason = "invoice_missing_equisix_relation";
+      rejectionReasons.push("missing_equisix_identity");
     } else {
       finalDecision = "review_required";
-      warnings.push("missing_data");
+      decisionReason = partialNameMatch ? "invoice_partial_match_requires_review" : "invoice_unclear_role_requires_review";
+      warnings.push(partialNameMatch ? "partial_identity_match" : "unclear_company_role");
     }
   } else {
-    finalDecision = "review_required";
-    warnings.push("missing_data");
+    finalDecision = "rejected_non_accounting";
+    decisionReason = "document_type_other";
+    rejectionReasons.push("unsupported_document_type");
   }
 
   const accountingRelevance = finalDecision === "approved_accounting_document"
@@ -376,6 +429,8 @@ export function buildClassification(params: {
     invoiceMatchType,
     partialNameMatch,
     visaMatched,
+    vendorReceiptMatched,
+    rejected: finalDecision.startsWith("rejected_"),
   });
 
   const approvalStatus =
@@ -432,8 +487,8 @@ export function buildClassification(params: {
     document: {
       documentNumber: firstMatch(params.text, /\b(?:invoice no|invoice number|cislo faktury|čislo faktury|doklad)\s*[:\-]?\s*([a-z0-9\-\/]+)/i),
       variableSymbol: firstMatch(params.text, /\b(?:variabilny symbol|variable symbol)\s*[:\-]?\s*([a-z0-9\-\/]+)/i),
-      issueDate: parseDate(params.text),
-      taxableSupplyDate: firstMatch(params.text, /\b(?:datum dodania|taxable supply date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i),
+      issueDate: invoiceDate,
+      taxableSupplyDate: deliveryDate,
       dueDate: firstMatch(params.text, /\b(?:splatnost|due date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i),
       orderNumber: firstMatch(params.text, /\b(?:order no|objednavka)\s*[:\-]?\s*([a-z0-9\-\/]+)/i),
       receiptNumber,
@@ -441,8 +496,11 @@ export function buildClassification(params: {
       paymentMethod: firstMatch(params.text, /\b(?:payment method|platba)\s*[:\-]?\s*([^\n]+)/i),
     },
     documentNumber: firstMatch(params.text, /\b(?:invoice no|invoice number|cislo faktury|čislo faktury|doklad)\s*[:\-]?\s*([a-z0-9\-\/]+)/i),
-    issueDate: parseDate(params.text),
-    taxableSupplyDate: firstMatch(params.text, /\b(?:datum dodania|taxable supply date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i),
+    issueDate: invoiceDate,
+    taxableSupplyDate: deliveryDate,
+    invoiceDate,
+    deliveryDate,
+    detectedPeriod,
     dueDate: firstMatch(params.text, /\b(?:splatnost|due date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i),
     amounts: {
       subtotal: firstMatch(params.text, /\b(?:subtotal|medzisucet|zaklad)\s*[:\-]?\s*([0-9]+[.,][0-9]{2})/i),

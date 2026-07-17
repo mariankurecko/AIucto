@@ -29,6 +29,21 @@ connections:
       - sheets
       - calendar
       - contacts
+  - id: kurecko-google-primary
+    name: Kurecko Primary Google Account
+    account_id: kurecko
+    provider: google
+    identity: kurecko@gmail.com
+    enabled: true
+    status: needs_auth
+    capabilities:
+      - gmail_read
+      - gmail_draft
+      - drive
+      - docs
+      - sheets
+      - calendar
+      - contacts
   - id: runtime-google-primary
     name: 85runtime Primary Google Account
     account_id: 85runtime
@@ -51,4 +66,4 @@ domain_routing:
     account_id: 85runtime
 explicit_identity_routing:
   - identity: kurecko@gmail.com
-    account_id: personal
+    account_id: kurecko

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
+import readline from "node:readline/promises";
 import { URL } from "node:url";
 import { google } from "googleapis";
 import {
@@ -88,6 +88,30 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+function resolveManualRedirectUri(installed: { redirect_uris?: string[] | null }): string {
+  const redirectUris = installed.redirect_uris ?? [];
+  return redirectUris.find((uri) => uri === "urn:ietf:wg:oauth:2.0:oob")
+    ?? "urn:ietf:wg:oauth:2.0:oob";
+}
+
+function extractAuthorizationCode(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error("Authorization code is required.");
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    const callbackUrl = new URL(trimmed);
+    const code = callbackUrl.searchParams.get("code");
+    if (!code) {
+      throw new Error("Pasted URL did not contain a 'code' parameter.");
+    }
+    return code;
+  }
+
+  return trimmed;
+}
+
 async function main(): Promise<void> {
   const connectionId = getArg("connection");
   const purpose = getArg("purpose") as GoogleTokenPurpose | undefined;
@@ -113,7 +137,7 @@ async function main(): Promise<void> {
     fail(`Token already exists: ${tokenPath}`);
   }
 
-  const redirectUri = `http://127.0.0.1:${purposeConfig.port}/oauth2callback`;
+  const redirectUri = resolveManualRedirectUri(installed);
   const oauth2Client = new google.auth.OAuth2(
     installed.client_id,
     installed.client_secret,
@@ -128,120 +152,83 @@ async function main(): Promise<void> {
     state,
     login_hint: connection.identity,
   });
+  console.log("Google OAuth authorization helper");
+  console.log("---------------------------------");
+  console.log(`Connection: ${connection.id}`);
+  console.log(`Account: ${connection.account_id}`);
+  console.log(`Identity: ${connection.identity}`);
+  console.log(`Purpose: ${purpose}`);
+  console.log(`Token file: ${path.basename(tokenPath)}`);
+  console.log(`Redirect URI: ${redirectUri}`);
+  console.log(`Scopes: ${purposeConfig.requestedScopes.join(", ")}`);
+  if (purpose === "gmail_send" && purposeConfig.requestedScopes.includes(EMAIL_SCOPE)) {
+    console.log("This authorization also requests email identity scopes for mailbox verification.");
+  }
+  console.log("");
+  console.log("Open this URL in the browser:");
+  console.log("");
+  console.log(authUrl);
+  console.log("");
+  console.log("After approving access, paste either the authorization code or the full redirect URL below.");
+  console.log("");
 
-  const server = http.createServer(async (request, response) => {
-    try {
-      if (!request.url) {
-        throw new Error("Missing request URL.");
-      }
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
 
-      const callbackUrl = new URL(request.url, redirectUri);
-      if (callbackUrl.pathname !== "/oauth2callback") {
-        response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("Not found.");
-        return;
-      }
-
-      const returnedState = callbackUrl.searchParams.get("state");
-      const code = callbackUrl.searchParams.get("code");
-      const oauthError = callbackUrl.searchParams.get("error");
-
-      if (oauthError) {
-        throw new Error(`Google authorization failed: ${oauthError}`);
-      }
-
-      if (returnedState !== state) {
-        throw new Error("State validation failed.");
-      }
-
-      if (!code) {
-        throw new Error("Authorization code is missing.");
-      }
-
-      const { tokens } = await oauth2Client.getToken(code);
-      if (!tokens.refresh_token) {
-        throw new Error(
-          "Google did not return a refresh token. Revoke the existing app grant and retry with consent.",
-        );
-      }
-      oauth2Client.setCredentials(tokens);
-
-      const grantedScopes = normalizeGrantedScopes(parseGrantedScopes(tokens.scope));
-      for (const scope of requirement.scopes) {
-        if (!grantedScopes.has(scope)) {
-          throw new Error(`Required scope was not granted: ${scope}`);
-        }
-      }
-
-      const authorizedEmail = purposeConfig.validateToken
-        ? await purposeConfig.validateToken({
-            oauth2Client,
-            tokens,
-            clientId: installed.client_id,
-            expectedEmail: connection.identity,
-          })
-        : await purposeConfig.validateIdentity({
-            auth: oauth2Client,
-            expectedEmail: connection.identity,
-          });
-
-      fs.writeFileSync(tokenPath, JSON.stringify({
-        connection_id: connection.id,
-        account_id: connection.account_id,
-        identity: connection.identity,
-        purpose,
-        scopes: purposeConfig.requestedScopes,
-        created_at: new Date().toISOString(),
-        credentials: tokens,
-      }, null, 2), { mode: 0o600, flag: "wx" });
-      fs.chmodSync(tokenPath, 0o600);
-
-      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.end("<html><body><h1>Authorization successful</h1><p>You can close this tab.</p></body></html>");
-
-      console.log("");
-      console.log("Google authorization successful.");
-      console.log(`Connection: ${connection.id}`);
-      console.log(`Account: ${connection.account_id}`);
-      console.log(`Identity: ${authorizedEmail}`);
-      console.log(`Purpose: ${purpose}`);
-      console.log(`Scopes: ${purposeConfig.requestedScopes.join(", ")}`);
-      console.log(`Token stored: ${tokenPath}`);
-      server.close();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-      response.end(`Authorization failed: ${message}`);
-      console.error(`ERROR: ${message}`);
-      server.close();
-      process.exitCode = 1;
+  try {
+    const rawInput = await rl.question("Paste authorization code here: ");
+    const code = extractAuthorizationCode(rawInput);
+    const { tokens } = await oauth2Client.getToken(code);
+    if (!tokens.refresh_token) {
+      throw new Error(
+        "Google did not return a refresh token. Revoke the existing app grant and retry with consent.",
+      );
     }
-  });
+    oauth2Client.setCredentials(tokens);
 
-  server.on("error", (error) => {
-    fail(`OAuth callback server failed: ${error.message}`);
-  });
+    const grantedScopes = normalizeGrantedScopes(parseGrantedScopes(tokens.scope));
+    for (const scope of requirement.scopes) {
+      if (!grantedScopes.has(scope)) {
+        throw new Error(`Required scope was not granted: ${scope}`);
+      }
+    }
 
-  server.listen(purposeConfig.port, "127.0.0.1", () => {
-    console.log("Google OAuth authorization helper");
-    console.log("---------------------------------");
+    const authorizedEmail = purposeConfig.validateToken
+      ? await purposeConfig.validateToken({
+          oauth2Client,
+          tokens,
+          clientId: installed.client_id,
+          expectedEmail: connection.identity,
+        })
+      : await purposeConfig.validateIdentity({
+          auth: oauth2Client,
+          expectedEmail: connection.identity,
+        });
+
+    fs.writeFileSync(tokenPath, JSON.stringify({
+      connection_id: connection.id,
+      account_id: connection.account_id,
+      identity: connection.identity,
+      purpose,
+      scopes: purposeConfig.requestedScopes,
+      created_at: new Date().toISOString(),
+      credentials: tokens,
+    }, null, 2), { mode: 0o600, flag: "wx" });
+    fs.chmodSync(tokenPath, 0o600);
+
+    console.log("");
+    console.log("Google authorization successful.");
     console.log(`Connection: ${connection.id}`);
     console.log(`Account: ${connection.account_id}`);
-    console.log(`Identity: ${connection.identity}`);
+    console.log(`Identity: ${authorizedEmail}`);
     console.log(`Purpose: ${purpose}`);
-    console.log(`Token file: ${path.basename(tokenPath)}`);
-    console.log(`Callback: ${redirectUri}`);
     console.log(`Scopes: ${purposeConfig.requestedScopes.join(", ")}`);
-    if (purpose === "gmail_send" && purposeConfig.requestedScopes.includes(EMAIL_SCOPE)) {
-      console.log("This authorization also requests email identity scopes for mailbox verification.");
-    }
-    console.log("");
-    console.log("Open this URL in the browser:");
-    console.log("");
-    console.log(authUrl);
-    console.log("");
-    console.log("Waiting for the Google callback...");
-  });
+    console.log(`Token stored: ${tokenPath}`);
+  } finally {
+    rl.close();
+  }
 }
 
 void main().catch((error) => {

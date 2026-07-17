@@ -59,8 +59,20 @@ const ClassificationSchema = z.object({
   short_receipt_text_threshold: z.number().int().positive().default(1000),
 }).default({});
 
+const PeriodValidationSchema = z.object({
+  enabled: z.boolean().default(true),
+  strict: z.boolean().default(true),
+  allow_fallback_to_delivery_date: z.boolean().default(true),
+  drive_cleanup_action: z.enum(["move_to_out_of_period", "delete"]).default("move_to_out_of_period"),
+}).default({});
+
+const IngestionSchema = z.object({
+  next_month_scan_days: z.number().int().min(0).max(31).default(15),
+}).default({});
+
 const ConfigSchema = z.object({
   account_id: z.string().min(1),
+  accounting_identity: z.string().min(1).optional(),
   source_email: z.string().email(),
   sender_email: z.string().email(),
   accountant_email: z.string().email(),
@@ -68,11 +80,13 @@ const ConfigSchema = z.object({
   schedule_day: z.number().int().min(1).max(28),
   schedule_time: z.string().regex(/^\d{2}:\d{2}$/),
   google_connection_id: z.string().min(1),
+  drive_google_connection_id: z.string().min(1).optional(),
   scan_incoming_mail: z.boolean(),
   scan_sent_mail: z.boolean(),
   accounting_keywords_file: z.string().min(1),
   openrouter_model: z.string().min(1),
   drive_root_name: z.string().min(1),
+  drive_root_folder_id: z.string().min(1).optional(),
   drive_accounting_folder: z.string().min(1),
   drive_invoices_folder: z.string().min(1),
   invoice_register_name: z.string().min(1),
@@ -91,6 +105,8 @@ const ConfigSchema = z.object({
   ocr_languages: z.array(z.string().min(1)).default(["slk", "ces", "eng"]),
   allow_external_models_for_documents: z.boolean().default(false),
   classification: ClassificationSchema.optional(),
+  period_validation: PeriodValidationSchema.optional(),
+  ingestion: IngestionSchema.optional(),
 });
 
 export function loadMonthlyConfig(projectRoot: string, accountId: string): MonthlyWorkflowConfig {
@@ -105,9 +121,12 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
   const parsed = ConfigSchema.parse(YAML.parse(fs.readFileSync(configPath, "utf8")));
   const thresholds = ThresholdSchema.parse(parsed.thresholds ?? {});
   const classification = ClassificationSchema.parse(parsed.classification ?? {});
+  const periodValidation = PeriodValidationSchema.parse(parsed.period_validation ?? {});
+  const ingestion = IngestionSchema.parse(parsed.ingestion ?? {});
 
   return {
     accountId: parsed.account_id,
+    accountingIdentity: parsed.accounting_identity ?? parsed.account_id,
     sourceEmail: parsed.source_email,
     senderEmail: parsed.sender_email,
     accountantEmail: parsed.accountant_email,
@@ -115,11 +134,13 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
     scheduleDay: parsed.schedule_day,
     scheduleTime: parsed.schedule_time,
     googleConnectionId: parsed.google_connection_id,
+    driveGoogleConnectionId: parsed.drive_google_connection_id ?? parsed.google_connection_id,
     scanIncomingMail: parsed.scan_incoming_mail,
     scanSentMail: parsed.scan_sent_mail,
     accountingKeywordsFile: parsed.accounting_keywords_file,
     openrouterModel: parsed.openrouter_model,
     driveRootName: parsed.drive_root_name,
+    driveRootFolderId: parsed.drive_root_folder_id ?? null,
     driveAccountingFolder: parsed.drive_accounting_folder,
     driveInvoicesFolder: parsed.drive_invoices_folder,
     invoiceRegisterName: parsed.invoice_register_name,
@@ -185,6 +206,15 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
       visaLast4: classification.visa_last_4,
       fuzzyNameDistance: classification.fuzzy_name_distance,
       shortReceiptTextThreshold: classification.short_receipt_text_threshold,
+    },
+    periodValidation: {
+      enabled: periodValidation.enabled,
+      strict: periodValidation.strict,
+      allowFallbackToDeliveryDate: periodValidation.allow_fallback_to_delivery_date,
+      driveCleanupAction: periodValidation.drive_cleanup_action,
+    },
+    ingestion: {
+      nextMonthScanDays: ingestion.next_month_scan_days,
     },
   };
 }

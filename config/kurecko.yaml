@@ -1,11 +1,13 @@
 account_id: kurecko
+accounting_identity: equisix
 source_email: kurecko@gmail.com
 sender_email: hello@equisix.com
 accountant_email: hello@equisix.com
 timezone: Europe/Bratislava
 schedule_day: 15
 schedule_time: "09:00"
-google_connection_id: equisix-google-primary
+google_connection_id: kurecko-google-primary
+drive_google_connection_id: equisix-google-primary
 scan_incoming_mail: true
 scan_sent_mail: true
 accounting_keywords_file: config/accounting-keywords.yaml
@@ -35,6 +37,13 @@ ocr_languages:
   - ces
   - eng
 allow_external_models_for_documents: false
+period_validation:
+  enabled: true
+  strict: true
+  allow_fallback_to_delivery_date: true
+  drive_cleanup_action: move_to_out_of_period
+ingestion:
+  next_month_scan_days: 15
 thresholds:
   invoice_auto_approve_overall: 90
   invoice_auto_approve_relation: 90

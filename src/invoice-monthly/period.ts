@@ -71,6 +71,22 @@ export function periodFromYearMonth(
   };
 }
 
+export function addDays(date: string, days: number): string {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+export function dateBelongsToPeriod(date: string | null | undefined, period: PeriodInfo): boolean {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  return date >= period.startDate && date < period.endExclusiveDate;
+}
+
+export function periodStringFromDate(date: string | null | undefined): string | null {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  return date.slice(0, 7);
+}
+
 export function formatInternalDateToLocalDate(
   internalDateMs: number,
   timeZone: string,
@@ -91,10 +107,11 @@ export function isInternalDateInPeriod(
   return localDate >= period.startDate && localDate < period.endExclusiveDate;
 }
 
-export function buildIncomingQuery(period: PeriodInfo): string {
+export function buildIncomingQuery(period: PeriodInfo, nextMonthScanDays = 15): string {
+  const scanBefore = addDays(period.endExclusiveDate, nextMonthScanDays);
   return [
     `after:${period.queryAfter}`,
-    `before:${period.queryBefore}`,
+    `before:${scanBefore.replace(/-/g, "/")}`,
     "has:attachment",
     "filename:pdf",
     "-in:sent",
@@ -103,11 +120,12 @@ export function buildIncomingQuery(period: PeriodInfo): string {
   ].join(" ");
 }
 
-export function buildSentQuery(period: PeriodInfo): string {
+export function buildSentQuery(period: PeriodInfo, nextMonthScanDays = 15): string {
+  const scanBefore = addDays(period.endExclusiveDate, nextMonthScanDays);
   return [
     "in:sent",
     `after:${period.queryAfter}`,
-    `before:${period.queryBefore}`,
+    `before:${scanBefore.replace(/-/g, "/")}`,
     "has:attachment",
     "filename:pdf",
     "-in:spam",

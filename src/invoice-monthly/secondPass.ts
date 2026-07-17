@@ -4,6 +4,8 @@ import { buildClassification, hasVisaEvidence } from "../../packages/classificat
 import { loadMonthlyConfig } from "./config.js";
 import { finalizeApprovedDocuments } from "./gmailDiscovery.js";
 import { ensureDirectory, readJsonFile, safeFileExtension, sha256Hex, writeJsonAtomic } from "./fs.js";
+import { periodFromString } from "./period.js";
+import { applyPeriodValidation } from "./periodValidation.js";
 import { extractDocumentText } from "./pdfExtraction.js";
 import { AttachmentSourceRef, ClassifiedDocument, KeywordAnalysis, SecondPassRoute } from "./types.js";
 
@@ -127,6 +129,7 @@ function buildFallbackSource(filename: string): AttachmentSourceRef {
 export async function runMonthlySecondPass(projectRoot: string, argv = process.argv.slice(2)): Promise<SecondPassOutput> {
   const args = parseArgs(argv);
   const config = loadMonthlyConfig(projectRoot, args.account);
+  const period = periodFromString(args.period, config.timezone);
   const monthlyFolder = path.join(projectRoot, "data", "invoice-runs", config.accountId, "monthly", args.period);
   const downloadsDirectory = path.join(monthlyFolder, "downloads");
   const textDirectory = path.join(monthlyFolder, "text");
@@ -228,6 +231,7 @@ export async function runMonthlySecondPass(projectRoot: string, argv = process.a
       keywordConfig: accountingKeywords,
       extraction,
     });
+    applyPeriodValidation(document, period, config);
     document.sourceMessages = prior?.sourceMessages ?? [source];
     document.originalFilename = prior?.originalFilename ?? basename;
     document.storedFilename = prior?.storedFilename ?? null;

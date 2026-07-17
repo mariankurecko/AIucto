@@ -60,6 +60,7 @@ test("manifest completeness and preservation of multiple Gmail source references
   const manifest = buildManifest({
     config: {
       accountId: "equisix",
+      accountingIdentity: "equisix",
       sourceEmail: "hello@equisix.com",
       senderEmail: "hello@equisix.com",
       accountantEmail: "hello@equisix.com",
@@ -67,9 +68,11 @@ test("manifest completeness and preservation of multiple Gmail source references
       scheduleDay: 15,
       scheduleTime: "09:00",
       googleConnectionId: "equisix-google-primary",
+      driveGoogleConnectionId: "equisix-google-primary",
       accountingKeywordsFile: "config/accounting-keywords.yaml",
       openrouterModel: "google/gemini-2.5-flash",
       driveRootName: "equisix.com",
+      driveRootFolderId: null,
       driveAccountingFolder: "Accounting",
       driveInvoicesFolder: "Invoices",
       invoiceRegisterName: "Invoice Register — Equisix",
@@ -84,6 +87,15 @@ test("manifest completeness and preservation of multiple Gmail source references
       packageVersion: 1,
       scanIncomingMail: true,
       scanSentMail: true,
+      periodValidation: {
+        enabled: true,
+        strict: true,
+        allowFallbackToDeliveryDate: true,
+        driveCleanupAction: "move_to_out_of_period",
+      },
+      ingestion: {
+        nextMonthScanDays: 15,
+      },
     },
     period: "2026-06",
     duplicateCount: 1,
@@ -226,7 +238,12 @@ test("monthly email idempotency and no real email during prepare-only workflow",
           month: { id: "m", name: "06", mimeType: "folder", webViewLink: "https://drive/month", appProperties: {}, parents: ["y"] },
         };
       },
-      async findFileByAppProperties() { return null; },
+      async findFileByAppProperties(parentId, appProperties) {
+        if (appProperties.resourceRole === "invoice_register") {
+          return { id: "sheet-1", name: "Invoice Register — Equisix", mimeType: "application/vnd.google-apps.spreadsheet", webViewLink: "https://docs.google.com/spreadsheets/d/sheet-1/edit", appProperties: {}, parents: [parentId] };
+        }
+        return null;
+      },
       async uploadOrReusePdf({ filename }) {
         return { created: true, file: { id: filename, name: filename, mimeType: "application/pdf", webViewLink: `https://drive/${filename}`, appProperties: {}, parents: ["m"] } };
       },

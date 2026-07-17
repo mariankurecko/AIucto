@@ -15,13 +15,6 @@ async function main(): Promise<void> {
     gmailSend: createGmailSendService(config),
   };
 
-  const googleResources = JSON.parse(
-    await import("node:fs").then((fs) =>
-      fs.readFileSync(`${projectRoot}/data/google-resources/${config.accountId}.json`, "utf8"),
-    ),
-  );
-  services.sheets = createSheetsService(config, googleResources.resources.invoice_register.id);
-
   const result = await runInvoiceMonthlyWorkflow(projectRoot, services, process.argv.slice(2));
   console.log(JSON.stringify(result, null, 2));
 }
