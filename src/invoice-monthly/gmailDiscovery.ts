@@ -8,7 +8,6 @@ import { extractDocumentText } from "./pdfExtraction.js";
 import { buildStoredFilename, ensureUniqueStoredFilenames } from "./filename.js";
 import { ensureDirectory, safeFileExtension, sha256Hex, validateSourceFilename, writeFileAtomic } from "./fs.js";
 import { normalizeCompact, normalizeForMatching } from "./textNormalization.js";
-import { isInternalDateInPeriod } from "./period.js";
 import { applyPeriodValidation } from "./periodValidation.js";
 import {
   AttachmentSourceRef,
@@ -548,7 +547,6 @@ export async function discoverPeriodAttachments(params: {
     const page = await params.gmail.listMessages(params.query, pageToken);
     for (const messageId of page.messageIds) {
       const message = await params.gmail.getMessage(messageId);
-      if (!isInternalDateInPeriod(message.internalDateMs, params.period)) continue;
       message.direction = params.direction;
       messages.push(message);
       for (const attachment of message.attachments) {

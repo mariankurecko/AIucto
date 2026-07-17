@@ -64,11 +64,8 @@ export function validateDocumentPeriod(document: Pick<ClassifiedDocument, "invoi
   if (!invoiceDate && !deliveryDate) {
     return { invoiceDate, deliveryDate, detectedPeriod, valid: false, usedFallbackDate: false, reason: "missing_date" };
   }
-  if (invoiceInPeriod) {
-    return { invoiceDate, deliveryDate, detectedPeriod, valid: true, usedFallbackDate: false, reason: "ok" };
-  }
-  if (config.periodValidation.allowFallbackToDeliveryDate && deliveryInPeriod) {
-    return { invoiceDate, deliveryDate, detectedPeriod, valid: true, usedFallbackDate: true, reason: "ok" };
+  if (invoiceInPeriod || deliveryInPeriod) {
+    return { invoiceDate, deliveryDate, detectedPeriod, valid: true, usedFallbackDate, reason: "ok" };
   }
   return { invoiceDate, deliveryDate, detectedPeriod, valid: false, usedFallbackDate, reason: "out_of_period" };
 }
