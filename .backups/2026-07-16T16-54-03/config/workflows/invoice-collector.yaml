@@ -1,0 +1,68 @@
+workflow:
+  id: invoice-collector
+  name: Invoice Collector
+  enabled: true
+  mode: review_before_commit
+  email_send_enabled: false
+  email_forward_enabled: false
+  supported_attachment_types:
+    - application/pdf
+  lookback_days_default: 30
+  ocr_enabled: false
+  audit_enabled: true
+
+account_configs:
+  - account_id: equisix
+    enabled: true
+    connection_ids:
+      - equisix-google-primary
+    company_legal_name: Equisix s.r.o.
+    drive_relative_root: 01 Accounting
+    sheet_name: Equisix Accounting Documents
+    accountant_recipient: null
+    search_terms:
+      - invoice
+      - faktúra
+      - faktura
+      - receipt
+      - tax invoice
+      - billing
+      - bill
+      - credit note
+      - dobropis
+      - doklad
+
+  - account_id: 85runtime
+    enabled: true
+    connection_ids:
+      - runtime-google-primary
+    company_legal_name: 85runtime s.r.o.
+    drive_relative_root: 01 Accounting
+    sheet_name: 85runtime Accounting Documents
+    accountant_recipient: null
+    search_terms:
+      - invoice
+      - faktúra
+      - faktura
+      - receipt
+      - tax invoice
+      - billing
+      - bill
+      - credit note
+      - dobropis
+      - doklad
+
+  - account_id: personal
+    enabled: false
+    connection_ids:
+      - personal-google-primary
+    company_legal_name: null
+    drive_relative_root: Finance
+    sheet_name: Personal Documents
+    accountant_recipient: null
+    search_terms:
+      - invoice
+      - faktúra
+      - faktura
+      - receipt
+      - doklad

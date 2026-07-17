@@ -1,0 +1,15 @@
+projects:
+  - id: coinomatic
+    name: Coinomatic
+    account_id: equisix
+    type: product
+    status: active
+    aliases:
+      - coinomatic.io
+    drive_relative_path: 02 Projects/Coinomatic
+    memory_namespace: account:equisix:project:coinomatic
+    ownership:
+      owner_account_id: equisix
+      development_account_id: null
+      billing_account_id: null
+    notes: Product belongs primarily to Equisix. Do not reassign ownership implicitly.

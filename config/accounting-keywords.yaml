@@ -1,0 +1,317 @@
+positive_keywords:
+  invoice:
+    - faktúra
+    - faktura
+    - faktúry
+    - faktury
+    - faktúre
+    - fakture
+    - faktúru
+    - fakturu
+    - faktúrou
+    - fakturou
+    - fakturačný
+    - fakturacny
+    - fakturačná
+    - fakturacna
+    - fakturačné
+    - fakturacne
+    - fakturačný doklad
+    - fakturacny doklad
+    - fakturačné doklady
+    - fakturacne doklady
+    - fakturačný údaj
+    - fakturacny udaj
+    - fakturačné údaje
+    - fakturacne udaje
+    - faktuar
+    - faktuary
+    - faktuaa
+    - fakturra
+    - faktur
+    - fakt
+    - fa
+    - fa.
+    - faktura_
+    - faktura-
+    - faktúra_
+    - faktúra-
+    - invoice
+    - invoices
+    - invoicing
+    - tax invoice
+    - commercial invoice
+    - supplier invoice
+    - customer invoice
+    - issued invoice
+    - received invoice
+    - billing invoice
+    - final invoice
+    - monthly invoice
+    - electronic invoice
+    - e-invoice
+    - einvoice
+    - invoice_
+    - invoice-
+  tax_document:
+    - daňový doklad
+    - danovy doklad
+    - daňové doklady
+    - danove doklady
+    - daňového dokladu
+    - danoveho dokladu
+    - daňovom doklade
+    - danovom doklade
+    - daňový dokument
+    - danovy dokument
+    - daňové dokumenty
+    - danove dokumenty
+    - opravný daňový doklad
+    - opravny danovy doklad
+    - zjednodušený daňový doklad
+    - zjednoduseny danovy doklad
+  accounting_document:
+    - doklad
+    - doklady
+    - dokladu
+    - doklade
+    - účtovný doklad
+    - uctovny doklad
+    - účtovné doklady
+    - uctovne doklady
+    - účtovného dokladu
+    - uctovneho dokladu
+    - účtovný dokument
+    - uctovny dokument
+    - účtovné dokumenty
+    - uctovne dokumenty
+    - platobný doklad
+    - platobne doklady
+    - pokladničný doklad
+    - pokladnicny doklad
+    - pokladničné doklady
+    - pokladnicne doklady
+    - príjmový doklad
+    - prijmovy doklad
+    - výdavkový doklad
+    - vydavkovy doklad
+  receipt:
+    - bloček
+    - blocek
+    - bločky
+    - bločky
+    - bločku
+    - blocku
+    - bločkom
+    - blockom
+    - pokladničný bloček
+    - pokladnicny blocek
+    - účtenka
+    - uctenka
+    - účtenky
+    - uctenky
+    - účtenku
+    - uctenku
+    - účtenkou
+    - uctenkou
+    - pokladničný blok
+    - pokladnicny blok
+    - paragón
+    - paragon
+    - paragóny
+    - paragony
+    - blok
+    - bloky
+    - block
+    - blocky
+    - blocik
+    - bločík
+    - bločiky
+    - blociky
+    - bloček
+    - receipt
+    - receipts
+    - payment receipt
+    - sales receipt
+    - purchase receipt
+    - cash receipt
+    - till receipt
+    - pos receipt
+    - proof of payment
+  billing:
+    - billing
+    - billing document
+    - billing statement
+    - bill
+    - bills
+    - statement
+    - account statement
+    - payment statement
+    - settlement
+    - vyúčtovanie
+    - vyuctovanie
+    - zúčtovanie
+    - zuctovanie
+    - mesačné vyúčtovanie
+    - mesacne vyuctovanie
+  credit_note:
+    - dobropis
+    - dobropisy
+    - dobropisu
+    - dobropise
+    - opravný doklad
+    - opravny doklad
+    - opravné doklady
+    - opravne doklady
+    - opravná faktúra
+    - opravna faktura
+    - opravné faktúry
+    - opravne faktury
+    - credit note
+    - credit notes
+    - credit memo
+    - credit memorandum
+    - corrective invoice
+    - correction invoice
+    - refund invoice
+  proforma:
+    - predfaktúra
+    - predfaktura
+    - predfaktúry
+    - predfaktury
+    - predfaktúru
+    - predfakturu
+    - zálohová faktúra
+    - zalohova faktura
+    - zálohové faktúry
+    - zalohove faktury
+    - preddavková faktúra
+    - preddavkova faktura
+    - preddavkové faktúry
+    - preddavkove faktury
+    - proforma invoice
+    - pro forma invoice
+    - proforma
+    - pro-forma
+    - advance invoice
+    - deposit invoice
+    - preliminary invoice
+supporting_signals:
+  - ičo
+  - ico
+  - dič
+  - dic
+  - ič dph
+  - ic dph
+  - vat id
+  - vat number
+  - tax id
+  - tax number
+  - company id
+  - company number
+  - registration number
+  - iban
+  - swift
+  - bic
+  - variabilný symbol
+  - variabilny symbol
+  - konštantný symbol
+  - konstantny symbol
+  - špecifický symbol
+  - specificky symbol
+  - vs
+  - ks
+  - ss
+  - číslo účtu
+  - cislo uctu
+  - bankové spojenie
+  - bankove spojenie
+  - payment reference
+  - reference number
+  - dátum vystavenia
+  - datum vystavenia
+  - dátum vyhotovenia
+  - datum vyhotovenia
+  - dátum dodania
+  - datum dodania
+  - dátum splatnosti
+  - datum splatnosti
+  - zdaniteľné plnenie
+  - zdanitelne plnenie
+  - dátum zdaniteľného plnenia
+  - datum zdanitelneho plnenia
+  - issue date
+  - invoice date
+  - date issued
+  - due date
+  - payment due
+  - date of supply
+  - tax point
+  - taxable supply date
+  - suma
+  - suma na úhradu
+  - suma na uhradu
+  - celkom
+  - celková suma
+  - celkova suma
+  - základ dane
+  - zaklad dane
+  - sadzba dph
+  - výška dph
+  - vyska dph
+  - dph
+  - k úhrade
+  - k uhrade
+  - na úhradu
+  - na uhradu
+  - uhradené
+  - uhradene
+  - neuhradené
+  - neuhradene
+  - amount
+  - amount due
+  - total
+  - total amount
+  - grand total
+  - subtotal
+  - tax
+  - vat
+  - vat amount
+  - vat rate
+  - net amount
+  - gross amount
+  - balance due
+  - paid
+  - unpaid
+  - eur
+  - €
+  - usd
+  - $
+  - gbp
+  - £
+  - czk
+  - kč
+  - pln
+  - zł
+  - huf
+  - ft
+  - chf
+negative_keywords:
+  - zmluva
+  - contract
+  - obchodné podmienky
+  - obchodne podmienky
+  - vop
+  - cenník
+  - cennik
+  - price list
+  - odstúpenie od zmluvy
+  - odstupenie od zmluvy
+  - withdrawal form
+  - manual
+  - príručka
+  - prirucka
+  - agreement
+  - marketing brochure
+  - product catalogue
+  - product catalog

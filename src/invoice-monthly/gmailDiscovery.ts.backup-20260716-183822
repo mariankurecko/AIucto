@@ -1,0 +1,289 @@
+import path from "node:path";
+import { ensureDirectory, sanitizePathSegment, sha256Hex, writeFileAtomic } from "./fs.js";
+import { analyzeKeywords } from "./accountingKeywords.js";
+import { classifyBySignals } from "./accountingSignals.js";
+import { extractPdfText } from "./pdfExtraction.js";
+import { buildStoredFilename, ensureUniqueStoredFilenames } from "./filename.js";
+import { isInternalDateInPeriod } from "./period.js";
+import { validatePdfFile } from "./pdfValidation.js";
+import {
+  AttachmentSourceRef,
+  ClassifiedDocument,
+  DiscoveredAttachment,
+  DownloadedAttachment,
+  FinalApprovedDocument,
+  GmailDirection,
+  GmailReadService,
+  GmailSourceMessage,
+  KeywordConfig,
+  MonthlyWorkflowConfig,
+  PeriodInfo,
+} from "./types.js";
+
+export async function discoverPeriodAttachments(params: {
+  config: MonthlyWorkflowConfig;
+  period: PeriodInfo;
+  gmail: GmailReadService;
+  query: string;
+  direction: GmailDirection;
+}): Promise<{ messages: GmailSourceMessage[]; attachments: DiscoveredAttachment[] }> {
+  const messages: GmailSourceMessage[] = [];
+  const attachments: DiscoveredAttachment[] = [];
+  let pageToken: string | null = null;
+
+  do {
+    const page = await params.gmail.listMessages(params.query, pageToken);
+    for (const messageId of page.messageIds) {
+      const message = await params.gmail.getMessage(messageId);
+      if (!isInternalDateInPeriod(message.internalDateMs, params.period)) {
+        continue;
+      }
+      message.direction = params.direction;
+      messages.push(message);
+      for (const attachment of message.attachments) {
+        const source: AttachmentSourceRef = {
+          messageId: message.messageId,
+          threadId: message.threadId,
+          direction: params.direction,
+          mailbox: message.mailbox,
+          from: message.from,
+          recipients: [...message.to, ...message.cc, ...message.bcc],
+          subject: message.subject,
+          timestampIso: message.timestampIso,
+          localDate: message.localDate,
+          attachmentId: attachment.attachmentId,
+          originalFilename: attachment.filename || "attachment.pdf",
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+        };
+        attachments.push({
+          source,
+          packagePeriod: params.period.period,
+        });
+      }
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  return { messages, attachments };
+}
+
+export async function downloadAttachments(params: {
+  attachments: DiscoveredAttachment[];
+  gmail: GmailReadService;
+  downloadDirectory: string;
+}): Promise<DownloadedAttachment[]> {
+  ensureDirectory(params.downloadDirectory);
+  const results: DownloadedAttachment[] = [];
+  for (const attachment of params.attachments) {
+    const preferredName = sanitizePathSegment(path.basename(attachment.source.originalFilename, path.extname(attachment.source.originalFilename)) || "attachment");
+    const outputPath = path.join(
+      params.downloadDirectory,
+      `${preferredName}-${attachment.source.messageId}-${attachment.source.attachmentId}.pdf`,
+    );
+    const data = await params.gmail.getAttachment(attachment.source.messageId, attachment.source.attachmentId);
+    writeFileAtomic(outputPath, data, 0o600);
+    const validated = validatePdfFile(outputPath);
+    results.push({
+      ...attachment,
+      localPath: outputPath,
+      normalizedFilename: path.basename(outputPath),
+      isPdf: validated.isPdf,
+      sha256: sha256Hex(validated.bytes),
+      sizeBytes: validated.bytes.length,
+    });
+  }
+  return results;
+}
+
+export function mergeDownloadedAttachments(downloaded: DownloadedAttachment[]): {
+  uniqueDocuments: Array<{
+    sha256: string;
+    localPath: string;
+    originalFilename: string;
+    mimeType: string;
+    sizeBytes: number;
+    isPdf: boolean;
+    sourceMessages: AttachmentSourceRef[];
+    duplicateOfSha256: string | null;
+  }>;
+  duplicateCount: number;
+  bothDirectionsCount: number;
+} {
+  const bySha = new Map<string, Array<typeof downloaded[number]>>();
+  for (const item of downloaded) {
+    const group = bySha.get(item.sha256) ?? [];
+    group.push(item);
+    bySha.set(item.sha256, group);
+  }
+
+  let duplicateCount = 0;
+  let bothDirectionsCount = 0;
+
+  const uniqueDocuments = [...bySha.entries()].map(([sha256, group]) => {
+    duplicateCount += group.length - 1;
+    const directions = new Set(group.map((item) => item.source.direction));
+    if (directions.size > 1) bothDirectionsCount += 1;
+    return {
+      sha256,
+      localPath: group[0].localPath,
+      originalFilename: group[0].source.originalFilename,
+      mimeType: group[0].source.mimeType,
+      sizeBytes: group[0].sizeBytes,
+      isPdf: group[0].isPdf,
+      sourceMessages: group.map((item) => item.source),
+      duplicateOfSha256: group.length > 1 ? sha256 : null,
+    };
+  });
+
+  return {
+    uniqueDocuments,
+    duplicateCount,
+    bothDirectionsCount,
+  };
+}
+
+export async function classifyDocuments(params: {
+  config: MonthlyWorkflowConfig;
+  keywordConfig: KeywordConfig;
+  uniqueDocuments: ReturnType<typeof mergeDownloadedAttachments>["uniqueDocuments"];
+  textDirectory: string;
+  llmResultsDirectory: string;
+  openrouter: import("./types.js").OpenRouterService;
+}): Promise<ClassifiedDocument[]> {
+  const results: ClassifiedDocument[] = [];
+  ensureDirectory(params.textDirectory);
+  ensureDirectory(params.llmResultsDirectory);
+
+  for (const item of params.uniqueDocuments) {
+    const extraction = await extractPdfText({
+      sha256: item.sha256,
+      localPath: item.localPath,
+      textDirectory: params.textDirectory,
+    });
+    const text = extraction.textPath ? await import("node:fs").then((fs) => fs.readFileSync(extraction.textPath!, "utf8")) : "";
+    const keywordAnalysis = analyzeKeywords(
+      {
+        subject: item.sourceMessages.map((source) => source.subject).join(" "),
+        filename: item.originalFilename,
+        text,
+      },
+      params.keywordConfig,
+    );
+    const localClassification = classifyBySignals({
+      keywordAnalysis,
+      extractionStatus: extraction.extractionStatus,
+      localTextAvailable: extraction.extractionStatus === "text_extracted",
+    });
+
+    let llmResult: import("./types.js").OpenRouterExtractionResult | null = null;
+    const shouldUseLlm =
+      extraction.extractionStatus === "text_extracted" &&
+      localClassification.approvalStatus !== "excluded_non_accounting";
+    const llmResultPath = path.join(params.llmResultsDirectory, `${item.sha256}.json`);
+
+    if (shouldUseLlm) {
+      try {
+        llmResult = await params.openrouter.extractDocument({
+          config: params.config,
+          document: {
+            source: item.sourceMessages[0],
+            packagePeriod: params.config.accountId,
+            localPath: item.localPath,
+            normalizedFilename: path.basename(item.localPath),
+            isPdf: item.isPdf,
+            sha256: item.sha256,
+            sizeBytes: item.sizeBytes,
+          },
+          text,
+          matchedAccountingKeywords: [...new Set(keywordAnalysis.matchedAccountingKeywords.map((match) => match.keyword))],
+          matchedSupportingSignals: [...new Set(keywordAnalysis.matchedSupportingSignals.map((match) => match.keyword))],
+          matchedNegativeSignals: [...new Set(keywordAnalysis.matchedNegativeSignals.map((match) => match.keyword))],
+          outputPath: llmResultPath,
+        });
+      } catch {
+        llmResult = null;
+      }
+    }
+
+    const documentType = llmResult?.documentType ?? localClassification.documentType;
+    const accountingRelevance = llmResult?.accountingRelevance ?? localClassification.accountingRelevance;
+    const approvalStatus =
+      localClassification.approvalStatus === "excluded_non_accounting"
+        ? "excluded_non_accounting"
+        : llmResult
+          ? (
+            llmResult.accountingRelevance === "non_accounting" && localClassification.score < 0
+              ? "excluded_non_accounting"
+              : llmResult.confidence >= 80 && llmResult.accountingRelevance === "accounting_document"
+                ? "auto_approved"
+                : "auto_approved_unverified"
+          )
+          : localClassification.approvalStatus;
+
+    results.push({
+      sha256: item.sha256,
+      sourceMessages: item.sourceMessages,
+      localPath: item.localPath,
+      originalFilename: item.originalFilename,
+      mimeType: item.mimeType,
+      sizeBytes: item.sizeBytes,
+      extractionStatus: extraction.extractionStatus,
+      textPath: extraction.textPath,
+      keywordAnalysis,
+      localAccountingScore: localClassification.score,
+      localSignals: localClassification.matchedSignals,
+      localDecisionReason: localClassification.reason,
+      documentType,
+      accountingRelevance,
+      approvalStatus,
+      supplierName: llmResult?.supplierName ?? null,
+      supplierCompanyId: llmResult?.supplierCompanyId ?? null,
+      supplierTaxId: llmResult?.supplierTaxId ?? null,
+      supplierVatId: llmResult?.supplierVatId ?? null,
+      customerName: llmResult?.customerName ?? null,
+      customerCompanyId: llmResult?.customerCompanyId ?? null,
+      customerTaxId: llmResult?.customerTaxId ?? null,
+      customerVatId: llmResult?.customerVatId ?? null,
+      documentNumber: llmResult?.documentNumber ?? null,
+      issueDate: llmResult?.issueDate ?? item.sourceMessages[0]?.localDate ?? null,
+      dueDate: llmResult?.dueDate ?? null,
+      taxableSupplyDate: llmResult?.taxableSupplyDate ?? null,
+      subtotalAmount: llmResult?.subtotalAmount ?? null,
+      vatAmount: llmResult?.vatAmount ?? null,
+      totalAmount: llmResult?.totalAmount ?? null,
+      currency: llmResult?.currency ?? null,
+      confidence: llmResult?.confidence ?? (localClassification.approvalStatus === "auto_approved" ? 80 : 55),
+      warnings: llmResult?.warnings ?? (extraction.error ? [extraction.error] : []),
+      llmResultPath: llmResult ? llmResultPath : null,
+      llmRetriesUsed: llmResult?.retriesUsed ?? 0,
+      storedFilename: null,
+      duplicateOfSha256: item.duplicateOfSha256,
+    });
+  }
+
+  return results;
+}
+
+export function finalizeApprovedDocuments(classified: ClassifiedDocument[]): {
+  approved: FinalApprovedDocument[];
+  excludedCount: number;
+  unverifiedCount: number;
+} {
+  const approved = classified
+    .filter((document) => ["auto_approved", "auto_approved_unverified"].includes(document.approvalStatus))
+    .map((document) => ({
+      ...document,
+      storedFilename: buildStoredFilename(document),
+      driveFileId: null,
+      driveFileUrl: null,
+    })) satisfies FinalApprovedDocument[];
+
+  const uniqueApproved = ensureUniqueStoredFilenames(approved);
+
+  return {
+    approved: uniqueApproved,
+    excludedCount: classified.length - uniqueApproved.length,
+    unverifiedCount: uniqueApproved.filter((document) => document.approvalStatus === "auto_approved_unverified").length,
+  };
+}

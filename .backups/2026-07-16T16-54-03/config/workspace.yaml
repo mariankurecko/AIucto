@@ -1,0 +1,7 @@
+workspace:
+  id: marian-ai-os
+  name: Marián AI Operating System
+  owner: Marián Kurečko
+  default_account_id: null
+  require_explicit_account_context_for_writes: true
+  created_version: "0.1"

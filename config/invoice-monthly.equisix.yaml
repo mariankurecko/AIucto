@@ -1,0 +1,98 @@
+account_id: equisix
+source_email: hello@equisix.com
+sender_email: hello@equisix.com
+accountant_email: hello@equisix.com
+timezone: Europe/Bratislava
+schedule_day: 15
+schedule_time: "09:00"
+google_connection_id: equisix-google-primary
+scan_incoming_mail: true
+scan_sent_mail: true
+accounting_keywords_file: config/accounting-keywords.yaml
+openrouter_model: google/gemini-2.5-flash
+drive_root_name: equisix.com
+drive_accounting_folder: Accounting
+drive_invoices_folder: Invoices
+invoice_register_name: Invoice Register — Equisix
+high_recall: true
+automatic_document_approval: true
+automatic_monthly_email_send: true
+include_manifest_in_zip: true
+always_include_monthly_drive_folder_link: true
+always_include_zip_drive_link: true
+zip_name_template: Accounting-Package-Equisix-{period}.zip
+gmail_attachment_limit_bytes: 25165824
+package_version: 1
+ocr_enabled: true
+ocr_languages:
+  - slk
+  - ces
+  - eng
+allow_external_models_for_documents: false
+thresholds:
+  invoice_auto_approve_overall: 90
+  invoice_auto_approve_relation: 90
+  invoice_auto_approve_document_type: 90
+  receipt_auto_approve_overall: 88
+  review_floor: 55
+company_identity:
+  legal_name: Equisix s.r.o.
+  known_names:
+    - Equisix s.r.o.
+    - Equisix
+    - EQUISIX S.R.O.
+    - EQUISIX
+    - equisix s.r.o.
+    - equisix
+  company_registration_number:
+    value: "55035523"
+    label_sk: IČO
+    aliases:
+      - "55035523"
+      - "IČO 55035523"
+      - "ICO 55035523"
+      - "Company ID 55035523"
+  tax_identification_number:
+    value: "2121847970"
+    label_sk: DIČ
+    aliases:
+      - "2121847970"
+      - "DIČ 2121847970"
+      - "DIC 2121847970"
+      - "Tax ID 2121847970"
+  vat_identification_number:
+    value: SK2121847970
+    label_sk: IČ DPH
+    aliases:
+      - SK2121847970
+      - SK 2121847970
+      - IČ DPH SK2121847970
+      - IC DPH SK2121847970
+      - VAT ID SK2121847970
+  registered_address:
+    street: Mukačevská 13872/24
+    postal_code: "080 01"
+    city: Prešov
+    country: Slovakia
+  registered_address_variants:
+    - Mukačevská 13872/24, 080 01 Prešov
+    - Mukačevská 13872/24 080 01 Prešov
+    - Mukacevska 13872/24, 080 01 Presov
+    - Mukacevska 13872/24 080 01 Presov
+    - Mukačevská 13872/24
+    - Mukacevska 13872/24
+    - 080 01 Prešov
+    - 08001 Prešov
+    - 080 01 Presov
+    - 08001 Presov
+  known_emails:
+    - hello@equisix.com
+  company_country:
+    - Slovakia
+    - Slovenská republika
+    - Slovensko
+    - SK
+  company_creation_date:
+    - "2022-11-19"
+  business_activity_reference:
+    primary_sk_nace: 6210 Počítačové programovanie

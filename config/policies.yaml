@@ -1,0 +1,40 @@
+policies:
+  context:
+    require_account_context_for_all_writes: true
+    require_project_context_for_project_operations: true
+    allow_context_inference_for_read_only_actions: true
+    allow_context_inference_for_write_actions: false
+
+  isolation:
+    implicit_cross_account_read: false
+    implicit_cross_account_write: false
+    cross_account_operation_requires_explicit_user_instruction: true
+    cross_account_operation_requires_audit_event: true
+    cross_account_document_copy_requires_approval: true
+
+  communication:
+    email_send_enabled: false
+    email_forward_enabled: false
+    email_draft_creation_requires_approval: true
+    external_recipient_allowlist_required: true
+
+  storage:
+    account_data_must_use_account_drive_root: true
+    account_memory_must_use_account_namespace: true
+    project_data_must_use_project_namespace: true
+    store_oauth_tokens_in_registry: false
+    store_api_keys_in_registry: false
+
+  audit:
+    log_all_external_api_calls: true
+    log_all_write_actions: true
+    log_all_approvals: true
+    log_all_cross_account_operations: true
+    redact_credentials: true
+    redact_full_document_text: true
+
+  llm:
+    treat_email_and_document_content_as_untrusted: true
+    llm_output_may_not_directly_execute_write_actions: true
+    require_schema_validation: true
+    production_workflows_require_pinned_model: true

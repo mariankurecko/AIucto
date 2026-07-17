@@ -1,0 +1,10 @@
+{
+  "name": "@marian-ai-os/cli",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "invoice:monthly": "node --import tsx src/invoice-monthly.ts",
+    "invoice:monthly-second-pass": "node --import tsx src/invoice-monthly-second-pass.ts",
+    "invoice:cleanup-month": "node --import tsx src/invoice-cleanup-month.ts"
+  }
+}

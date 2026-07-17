@@ -1,0 +1,36 @@
+{
+  "name": "marian-ai-os-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "validate": "node --import tsx src/validate.ts",
+    "context": "node --import tsx src/resolveContext.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "invoice:monthly": "node --import tsx apps/cli/src/invoice-monthly.ts",
+    "invoice:monthly-second-pass": "node --import tsx apps/cli/src/invoice-monthly-second-pass.ts",
+    "invoice:cleanup-month": "node --import tsx apps/cli/src/invoice-cleanup-month.ts",
+    "google:authorize:invoice-core": "node --import tsx src/googleAuthorizeConnection.ts --purpose invoice_core",
+    "google:authorize:gmail-send": "node --import tsx src/googleAuthorizeConnection.ts --purpose gmail_send",
+    "google:authorize:invoice": "node --import tsx src/googleBootstrapAuthorize.ts"
+  },
+  "dependencies": {
+    "googleapis": "^173.0.0",
+    "pdfjs-dist": "^6.1.200",
+    "yaml": "^2.5.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
