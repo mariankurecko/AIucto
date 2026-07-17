@@ -13,3 +13,9 @@ secrets/
 *.db-wal
 logs/
 tmp/
+.backups/
+*.backup-*
+data/
+tokens/
+secrets/
+.env
