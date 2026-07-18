@@ -150,6 +150,7 @@ export type PackageStatus =
   | "already_sent"
   | "sent"
   | "dry_run"
+  | "reconciled"
   | "failed";
 
 export type CompanyIdentityConfig = {
@@ -797,6 +798,13 @@ export type DriveService = {
     mimeType: string;
     appProperties: Record<string, string>;
   }): Promise<{ file: DriveFileRecord; created: boolean }>;
+  ensureFileInFolder?(input: {
+    parentId: string;
+    localPath: string;
+    filename: string;
+    mimeType: string;
+    appProperties: Record<string, string>;
+  }): Promise<{ file: DriveFileRecord | null; created: boolean; alreadyPresent: boolean }>;
   uploadOrReplaceJson(input: {
     parentId: string;
     filename: string;

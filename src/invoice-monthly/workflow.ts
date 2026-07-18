@@ -9,9 +9,10 @@ import { buildManifest } from "./manifest.js";
 import { buildIncomingQuery, buildSentQuery, computePreviousCalendarMonth, periodFromString } from "./period.js";
 import { buildRunDirectory, buildRunStatePath, initializeRunState, updateRunState } from "./runState.js";
 import { classifyDocuments, discoverPeriodAttachments, downloadAttachments, finalizeApprovedDocuments, mergeDownloadedAttachments } from "./gmailDiscovery.js";
+import { compareResultsWithDrive, syncApprovedDocumentsToDrive } from "./driveSync.js";
 import { ClassifiedDocument, InvoiceMonthlyServices, PackageStatus, PreparedEmail, SendRecord, WorkflowMode } from "./types.js";
 
-function parseArgs(argv: string[]): { account: string; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; } {
+function parseArgs(argv: string[]): { account: string; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; } {
   function getArg(name: string): string | undefined {
     const index = argv.indexOf(`--${name}`);
     return index >= 0 ? argv[index + 1] : undefined;
@@ -25,6 +26,7 @@ function parseArgs(argv: string[]): { account: string; period?: string; dryRun: 
     forceResend: getArg("force-resend") === "YES",
     forceReclassify: argv.includes("--force-reclassify"),
     ocr: argv.includes("--ocr"),
+    reconcileDrive: argv.includes("--reconcile-drive"),
   };
 }
 
@@ -101,20 +103,6 @@ function uploadLog(event: string, payload: Record<string, unknown>) {
   }));
 }
 
-function uploadParentId(params: {
-  folderTree: Awaited<ReturnType<InvoiceMonthlyServices["drive"]["ensureMonthlyFolder"]>>;
-  document: ClassifiedDocument;
-}): string {
-  return params.folderTree.approved?.id ?? params.folderTree.month.id;
-}
-
-function uploadFilename(document: ClassifiedDocument): string {
-  return document.safeStoredFilename
-    ?? document.storedFilename
-    ?? document.originalFilename
-    ?? `${document.sha256.slice(0, 12)}.${document.fileExtension ?? "bin"}`;
-}
-
 async function uploadOriginalDocuments(params: {
   config: ReturnType<typeof loadMonthlyConfig>;
   services: InvoiceMonthlyServices;
@@ -123,76 +111,23 @@ async function uploadOriginalDocuments(params: {
   period: string;
   documents: ClassifiedDocument[];
 }) {
-  let uploaded = 0;
-  let reused = 0;
-  let failed = 0;
-
-  for (const document of params.documents) {
-    if (document.finalDecision !== "approved_accounting_document") {
-      document.driveFileId = null;
-      document.driveUrl = null;
-      document.driveFileUrl = null;
-      document.reviewDriveFileId = null;
-      document.reviewDriveFileUrl = null;
-      document.uploadError = null;
-      continue;
-    }
-
-    try {
-      const upload = await params.services.drive.uploadOrReuseFile!({
-        parentId: uploadParentId({ folderTree: params.folderTree, document }),
-        localPath: document.localPath,
-        filename: uploadFilename(document),
-        mimeType: document.mimeType,
-        appProperties: {
-          marianAiOs: "true",
-          accountingIdentity: params.config.accountingIdentity,
-          accountId: params.config.accountId,
-          sha256: document.sha256,
-          sourceRun: params.runId,
-          sourcePeriod: params.period,
-          packagePeriod: params.period,
-          sourceMailbox: [...new Set(document.sourceMessages.map((source) => source.mailbox))].join(","),
-          documentType: document.documentType,
-          finalDecision: document.finalDecision ?? "rejected_non_accounting",
-          resourceRole: "original_document",
-        },
-      });
-      document.driveFileId = upload.file.id;
-      document.driveUrl = upload.file.webViewLink ?? `https://drive.google.com/file/d/${upload.file.id}/view`;
-      document.driveFileUrl = document.driveUrl;
-      document.uploadError = null;
-      if (upload.created) uploaded += 1;
-      else reused += 1;
-      uploadLog("invoice.document_upload.succeeded", {
-        sha256: document.sha256,
-        filename: document.originalFilename,
-        sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
-        deduplicated: document.sourceMessages.length > 1,
-        finalDecision: document.finalDecision,
-        created: upload.created,
-        uploadTargetFolderId: uploadParentId({ folderTree: params.folderTree, document }),
-        driveFileId: document.driveFileId,
-        driveUrl: document.driveUrl,
-      });
-    } catch (error) {
-      failed += 1;
-      document.driveFileId = null;
-      document.driveUrl = null;
-      document.driveFileUrl = null;
-      document.uploadError = error instanceof Error ? error.message : String(error);
-      uploadLog("invoice.document_upload.failed", {
-        sha256: document.sha256,
-        filename: document.originalFilename,
-        sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
-        deduplicated: document.sourceMessages.length > 1,
-        finalDecision: document.finalDecision,
-        uploadError: document.uploadError,
-      });
-    }
-  }
-
-  return { uploaded, reused, failed };
+  // Deterministic, retrying, quota-safe sync. Approved documents are guaranteed
+  // to land in the "Approved Documents" folder (folder-scoped idempotency), and
+  // transient/quota failures never sink the run — they are queued and reported.
+  const summary = await syncApprovedDocumentsToDrive({
+    config: params.config,
+    services: params.services,
+    folderTree: params.folderTree,
+    runId: params.runId,
+    period: params.period,
+    documents: params.documents,
+    mode: "run",
+  });
+  return {
+    uploaded: summary.uploaded_now,
+    reused: summary.already_present,
+    failed: summary.failed + summary.quota_deferred,
+  };
 }
 
 function writeClassifiedOutputs(runDirectory: string, documents: ClassifiedDocument[]) {
@@ -223,6 +158,92 @@ function mergeFinalizedDocuments(params: {
       uploadError: document.uploadError ?? finalized.uploadError ?? null,
     };
   });
+}
+
+function printDriveSyncSummary(header: string, summary: { total_documents: number; approved_documents: number; uploaded_now: number; already_present: number; missing_after_run: number; }): void {
+  console.log([
+    "",
+    `PRINT SUMMARY — ${header}`,
+    `- total_documents:    ${summary.total_documents}`,
+    `- approved_documents: ${summary.approved_documents}`,
+    `- uploaded_now:       ${summary.uploaded_now}`,
+    `- already_present:    ${summary.already_present}`,
+    `- missing_after_run:  ${summary.missing_after_run}`,
+    "",
+  ].join("\n"));
+}
+
+/**
+ * STEP 3 — reconciliation-only entry point. Reuses the classified results that
+ * already exist on disk (no Gmail, no OCR, no LLM) and deterministically pushes
+ * every approved document into Drive, then audits the result.
+ */
+async function runDriveReconciliation(params: {
+  projectRoot: string;
+  config: ReturnType<typeof loadMonthlyConfig>;
+  services: InvoiceMonthlyServices;
+  period: ReturnType<typeof periodFromString>;
+  runDirectory: string;
+  statePath: string;
+  currentState: ReturnType<typeof initializeRunState>;
+}): Promise<{ status: PackageStatus; output: Record<string, unknown>; }> {
+  const { config, services, period } = params;
+  const classifiedPath = path.join(params.runDirectory, "classified.json");
+  if (!fs.existsSync(classifiedPath)) {
+    throw new Error(`--reconcile-drive requires an existing run: classified.json not found at ${classifiedPath}. Run the monthly pipeline first.`);
+  }
+  const classified = readJsonFile<ClassifiedDocument[]>(classifiedPath);
+
+  const driveAuthorizedEmail = await services.drive.getAuthorizedEmail();
+  uploadLog("invoice.reconcile.started", {
+    accountId: config.accountId,
+    accountingIdentity: config.accountingIdentity,
+    driveConnectionId: config.driveGoogleConnectionId,
+    driveAuthorizedEmail,
+    period: period.period,
+    totalDocuments: classified.length,
+    approvedDocuments: classified.filter((document) => document.finalDecision === "approved_accounting_document").length,
+  });
+
+  const folderTree = await services.drive.ensureMonthlyFolder(config, period);
+  const summary = await syncApprovedDocumentsToDrive({
+    config,
+    services,
+    folderTree,
+    runId: params.currentState.runId,
+    period: period.period,
+    documents: classified,
+    mode: "reconcile",
+  });
+
+  // Persist the resolved Drive state back so subsequent audits/passes see it.
+  writeJsonAtomic(classifiedPath, classified, 0o600);
+  writeClassifiedOutputs(params.runDirectory, classified);
+
+  const audit = await compareResultsWithDrive({ projectRoot: params.projectRoot, services, config, period, folderTree });
+  printDriveSyncSummary("reconcile-drive", summary);
+  if (audit.missing_in_drive.length === 0 && summary.failed === 0) {
+    console.log("DRIVE SYNC IS NOW DETERMINISTIC");
+  }
+  updateRunState(params.statePath, params.currentState, { stage: "completed" });
+
+  return {
+    status: "reconciled",
+    output: {
+      period: period.period,
+      mode: "reconcile_drive",
+      monthlyFolderUrl: folderTree.month.webViewLink,
+      approvedFolderId: folderTree.approved?.id ?? folderTree.month.id,
+      total_documents: summary.total_documents,
+      approved_documents: summary.approved_documents,
+      uploaded_now: summary.uploaded_now,
+      already_present: summary.already_present,
+      missing_after_run: summary.missing_after_run,
+      failed: summary.failed,
+      quota_deferred: summary.quota_deferred,
+      audit,
+    },
+  };
 }
 
 export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: InvoiceMonthlyServices, argv = process.argv.slice(2)): Promise<{ status: PackageStatus; output: Record<string, unknown>; }> {
@@ -256,6 +277,14 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
 
   if (args.dryRun) {
     return { status: "dry_run", output: { period: period.period, incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
+  }
+
+  // STEP 3 — Force reconciliation mode. Skips Gmail scan and OCR entirely and
+  // only reconciles the already-classified results with Drive, so a run that
+  // ended in "prepared" (or hit a quota mid-way) can be recovered without a full
+  // rerun. IF a document is approved AND not in Drive → upload.
+  if (args.reconcileDrive) {
+    return runDriveReconciliation({ projectRoot, config, services, period, runDirectory, statePath, currentState });
   }
 
   const [gmailAuthorizedEmail, driveAuthorizedEmail] = await Promise.all([
@@ -378,16 +407,26 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
     accountingFolderId: folderTree.accounting.id,
   });
   const invoiceRegisterUrl = invoiceRegister.webViewLink ?? "";
-  await services.sheets.ensureDocumentsSheet(invoiceRegister.id);
-  const sheetResult = await services.sheets.upsertDocuments({
-    spreadsheetId: invoiceRegister.id,
-    sheetName: "Documents",
-    monthlyFolderUrl: folderTree.month.webViewLink ?? "",
-    zipPackageUrl: zipUpload.webViewLink ?? "",
-    runId: currentState.runId,
-    processedAt: new Date().toISOString(),
-    documents: allDocumentsForManifest,
-  });
+  let sheetResult = { appended: 0, updated: 0 };
+  try {
+    await services.sheets.ensureDocumentsSheet(invoiceRegister.id);
+    sheetResult = await services.sheets.upsertDocuments({
+      spreadsheetId: invoiceRegister.id,
+      sheetName: "Documents",
+      monthlyFolderUrl: folderTree.month.webViewLink ?? "",
+      zipPackageUrl: zipUpload.webViewLink ?? "",
+      runId: currentState.runId,
+      processedAt: new Date().toISOString(),
+      documents: allDocumentsForManifest,
+    });
+  } catch (sheetError) {
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      event: "sheets.quota_exceeded_final",
+      message: sheetError instanceof Error ? sheetError.message : String(sheetError),
+    }));
+  }
   currentState = updateRunState(statePath, currentState, { stage: "sheet_updated", invoiceRegisterUrl });
 
   const preparedEmail = buildEmail({
@@ -445,6 +484,17 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
 
   currentState = updateRunState(statePath, currentState, { stage: "completed" });
   writeJsonAtomic(discoveryPath, { incoming: incomingDiscovery, sent: sentDiscovery, downloadedCount: downloaded.length }, 0o600);
+
+  // STEP 1/4 — verify determinism at the end of every run: audit results vs Drive
+  // and print the sync summary. Any gap is logged as "DRIVE SYNC GAP DETECTED".
+  const driveAudit = await compareResultsWithDrive({ projectRoot, services, config, period, folderTree });
+  printDriveSyncSummary("run", {
+    total_documents: classified.length,
+    approved_documents: finalDocuments.approved.length,
+    uploaded_now: uploadStats.uploaded,
+    already_present: uploadStats.reused,
+    missing_after_run: driveAudit.missing_in_drive.length,
+  });
 
   writeAuditSummary(auditPath, {
     runId: currentState.runId,
@@ -526,6 +576,8 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       approvedCount: finalDocuments.approved.length,
       reviewCount: finalDocuments.reviewRequired.length,
       rejectedCount: finalDocuments.rejected.length,
+      driveMissingCount: driveAudit.missing_in_drive.length,
+      drivePresentCount: driveAudit.total_present_in_drive,
     },
   };
 }

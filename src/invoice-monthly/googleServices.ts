@@ -226,6 +226,33 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
       });
       return { file: recordFromDrive(created.data), created: true };
     },
+    // Folder-scoped idempotent upload: dedup is checked WITHIN the target folder
+    // (by sha256) rather than globally, so an approved document is guaranteed to
+    // exist in THIS folder even if the same sha256 already lives elsewhere (e.g.
+    // a prior "Review Required" placement). This is what makes the sync
+    // deterministic: presence is evaluated against the folder we must land in.
+    async ensureFileInFolder(input) {
+      let existing: DriveFileRecord | null = null;
+      try {
+        existing = await this.findFileByAppProperties(input.parentId, {
+          marianAiOs: "true",
+          accountingIdentity: input.appProperties.accountingIdentity,
+          sha256: input.appProperties.sha256,
+          resourceRole: input.appProperties.resourceRole,
+        });
+      } catch (error) {
+        // Drive ambiguity (>1 match) means the file already exists here; treat as present.
+        if (!String((error as Error)?.message ?? "").includes("Drive ambiguity")) throw error;
+        return { file: null, created: false, alreadyPresent: true };
+      }
+      if (existing) return { file: existing, created: false, alreadyPresent: true };
+      const created = await drive.files.create({
+        requestBody: { name: input.filename, parents: [input.parentId], appProperties: input.appProperties },
+        media: { mimeType: input.mimeType, body: fs.createReadStream(input.localPath) },
+        fields: "id,name,mimeType,webViewLink,appProperties,parents",
+      });
+      return { file: recordFromDrive(created.data), created: true, alreadyPresent: false };
+    },
     async uploadOrReusePdf(input) {
       return this.uploadOrReuseFile!({
         parentId: input.parentId,
@@ -274,11 +301,57 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
   };
 }
 
+const SHEETS_BATCH_SIZE = 50;
+const SHEETS_MIN_INTERVAL_MS = 500;
+const SHEETS_MAX_RETRIES = 5;
+
+export function isQuotaError(error: unknown): boolean {
+  const msg = String((error as any)?.message ?? "").toLowerCase();
+  const code = (error as any)?.code;
+  const reason = String((error as any)?.errors?.[0]?.reason ?? "");
+  return code === 429 || msg.includes("quota") || reason.includes("rateLimit") || reason.includes("userRateLimit");
+}
+
+function sheetsLog(level: "warn" | "error", event: string, extra: Record<string, unknown>): void {
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...extra }));
+}
+
+function buildThrottle(minIntervalMs: number) {
+  let lastMs = 0;
+  return async function throttle() {
+    const now = Date.now();
+    const wait = minIntervalMs - (now - lastMs);
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastMs = Date.now();
+  };
+}
+
+async function withSheetsRetry<T>(
+  label: string,
+  throttle: () => Promise<void>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let delayMs = 1000;
+  for (let attempt = 1; attempt <= SHEETS_MAX_RETRIES; attempt++) {
+    await throttle();
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isQuotaError(error) || attempt === SHEETS_MAX_RETRIES) throw error;
+      sheetsLog("warn", "sheets.quota_retry_attempt", { label, attempt, delayMs });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 8000);
+    }
+  }
+  throw new Error("unreachable");
+}
+
 export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId: string): SheetsService {
   const credentials = loadGoogleClientCredentials();
   const token = loadGoogleTokenOrThrow(config.driveGoogleConnectionId, "drive_sheets").record;
   const auth = oauthClient(credentials, token);
   const sheets = google.sheets({ version: "v4", auth });
+  const throttle = buildThrottle(SHEETS_MIN_INTERVAL_MS);
 
   const headers = [
     "Accounting Period", "Source Mailbox", "Source Direction", "Gmail Message ID", "Gmail Thread ID", "Email Date", "Sender", "Recipients", "Email Subject",
@@ -293,23 +366,39 @@ export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId
     async ensureDocumentsSheet(requestSpreadsheetId) {
       const targetSpreadsheetId = requestSpreadsheetId || spreadsheetId;
       if (!targetSpreadsheetId) throw new Error("Missing spreadsheetId for ensureDocumentsSheet.");
-      const metadata = await sheets.spreadsheets.get({ spreadsheetId: targetSpreadsheetId });
+      const metadata = await withSheetsRetry("spreadsheets.get", throttle, () =>
+        sheets.spreadsheets.get({ spreadsheetId: targetSpreadsheetId }),
+      );
       const existing = metadata.data.sheets?.find((sheet) => sheet.properties?.title === "Documents");
       if (!existing) {
-        await sheets.spreadsheets.batchUpdate({
-          spreadsheetId: targetSpreadsheetId,
-          requestBody: { requests: [{ addSheet: { properties: { title: "Documents", gridProperties: { frozenRowCount: 1 } } } }] },
-        });
+        await withSheetsRetry("spreadsheets.batchUpdate.addSheet", throttle, () =>
+          sheets.spreadsheets.batchUpdate({
+            spreadsheetId: targetSpreadsheetId,
+            requestBody: { requests: [{ addSheet: { properties: { title: "Documents", gridProperties: { frozenRowCount: 1 } } } }] },
+          }),
+        );
       }
-      const firstRow = await sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!1:1" });
+      const firstRow = await withSheetsRetry("values.get.header", throttle, () =>
+        sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!1:1" }),
+      );
       if ((firstRow.data.values?.[0] ?? []).length === 0) {
-        await sheets.spreadsheets.values.update({ spreadsheetId: targetSpreadsheetId, range: "Documents!A1", valueInputOption: "RAW", requestBody: { values: [headers] } });
+        await withSheetsRetry("values.update.header", throttle, () =>
+          sheets.spreadsheets.values.update({
+            spreadsheetId: targetSpreadsheetId,
+            range: "Documents!A1",
+            valueInputOption: "RAW",
+            requestBody: { values: [headers] },
+          }),
+        );
       }
     },
     async upsertDocuments(params) {
       const targetSpreadsheetId = params.spreadsheetId || spreadsheetId;
       if (!targetSpreadsheetId) throw new Error("Missing spreadsheetId for upsertDocuments.");
-      const existing = await sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!A:AZ" });
+
+      const existing = await withSheetsRetry("values.get.documents", throttle, () =>
+        sheets.spreadsheets.values.get({ spreadsheetId: targetSpreadsheetId, range: "Documents!A:AZ" }),
+      );
       const rows = existing.data.values ?? [];
       const shaIndex = headers.indexOf("SHA-256");
       const existingRows = new Map<string, number>();
@@ -320,6 +409,7 @@ export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId
 
       const updates: Array<{ rowNumber: number; values: string[] }> = [];
       const appends: string[][] = [];
+
       for (const document of params.documents) {
         const identityMatches = document.identityMatches ?? { legalName: false, registrationNumber: false, taxId: false, vatId: false, address: false, email: false, matchedFields: [] };
         const supplier = document.supplier ?? { legalName: null, registrationNumber: null, taxId: null, vatId: null, address: null, email: null };
@@ -380,12 +470,34 @@ export function createSheetsService(config: MonthlyWorkflowConfig, spreadsheetId
         else appends.push(values);
       }
 
-      for (const update of updates) {
-        await sheets.spreadsheets.values.update({ spreadsheetId: targetSpreadsheetId, range: `Documents!A${update.rowNumber}`, valueInputOption: "RAW", requestBody: { values: [update.values] } });
+      // Batch updates in groups of SHEETS_BATCH_SIZE to stay within request limits
+      for (let i = 0; i < updates.length; i += SHEETS_BATCH_SIZE) {
+        const batch = updates.slice(i, i + SHEETS_BATCH_SIZE);
+        await withSheetsRetry(`values.batchUpdate[${i}]`, throttle, () =>
+          sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId: targetSpreadsheetId,
+            requestBody: {
+              valueInputOption: "RAW",
+              data: batch.map((u) => ({ range: `Documents!A${u.rowNumber}`, values: [u.values] })),
+            },
+          }),
+        );
       }
-      if (appends.length > 0) {
-        await sheets.spreadsheets.values.append({ spreadsheetId: targetSpreadsheetId, range: "Documents!A:AZ", valueInputOption: "RAW", insertDataOption: "INSERT_ROWS", requestBody: { values: appends } });
+
+      // Append new rows in batches of SHEETS_BATCH_SIZE
+      for (let i = 0; i < appends.length; i += SHEETS_BATCH_SIZE) {
+        const batch = appends.slice(i, i + SHEETS_BATCH_SIZE);
+        await withSheetsRetry(`values.append[${i}]`, throttle, () =>
+          sheets.spreadsheets.values.append({
+            spreadsheetId: targetSpreadsheetId,
+            range: "Documents!A:AZ",
+            valueInputOption: "RAW",
+            insertDataOption: "INSERT_ROWS",
+            requestBody: { values: batch },
+          }),
+        );
       }
+
       return { appended: appends.length, updated: updates.length };
     },
   };
