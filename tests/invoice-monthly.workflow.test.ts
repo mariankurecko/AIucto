@@ -96,6 +96,13 @@ test("manifest completeness and preservation of multiple Gmail source references
       ingestion: {
         nextMonthScanDays: 15,
       },
+      processing: {
+        mode: "local",
+        incomingPath: "",
+        resultsPath: "",
+        pollIntervalMs: 2000,
+        timeoutMs: 300000,
+      },
     },
     period: "2026-06",
     duplicateCount: 1,

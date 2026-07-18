@@ -70,6 +70,17 @@ const IngestionSchema = z.object({
   next_month_scan_days: z.number().int().min(0).max(31).default(15),
 }).default({});
 
+const ProcessingSchema = z.object({
+  mode: z.enum(["local", "hybrid"]).default("local"),
+  incoming_path: z.string().min(1).optional(),
+  results_path: z.string().min(1).optional(),
+  poll_interval_ms: z.number().int().positive().default(2000),
+  timeout_ms: z.number().int().positive().default(300000),
+}).default({}).refine(
+  (value) => value.mode !== "hybrid" || (Boolean(value.incoming_path) && Boolean(value.results_path)),
+  { message: "processing.incoming_path and processing.results_path are required when processing.mode is 'hybrid'." },
+);
+
 const ConfigSchema = z.object({
   account_id: z.string().min(1),
   accounting_identity: z.string().min(1).optional(),
@@ -107,6 +118,7 @@ const ConfigSchema = z.object({
   classification: ClassificationSchema.optional(),
   period_validation: PeriodValidationSchema.optional(),
   ingestion: IngestionSchema.optional(),
+  processing: ProcessingSchema.optional(),
 });
 
 export function loadMonthlyConfig(projectRoot: string, accountId: string): MonthlyWorkflowConfig {
@@ -123,6 +135,7 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
   const classification = ClassificationSchema.parse(parsed.classification ?? {});
   const periodValidation = PeriodValidationSchema.parse(parsed.period_validation ?? {});
   const ingestion = IngestionSchema.parse(parsed.ingestion ?? {});
+  const processing = ProcessingSchema.parse(parsed.processing ?? {});
 
   return {
     accountId: parsed.account_id,
@@ -215,6 +228,13 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
     },
     ingestion: {
       nextMonthScanDays: ingestion.next_month_scan_days,
+    },
+    processing: {
+      mode: processing.mode,
+      incomingPath: processing.incoming_path ?? "",
+      resultsPath: processing.results_path ?? "",
+      pollIntervalMs: processing.poll_interval_ms,
+      timeoutMs: processing.timeout_ms,
     },
   };
 }

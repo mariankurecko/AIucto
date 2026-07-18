@@ -5,6 +5,7 @@ import { analyzeKeywords } from "./accountingKeywords.js";
 import { matchEquisixIdentity } from "./companyIdentity.js";
 import { buildClassification as buildClassificationEngine } from "../../packages/classification/src/index.js";
 import { extractDocumentText } from "./pdfExtraction.js";
+import { extractDocumentTextHybrid } from "./hybridExtraction.js";
 import { buildStoredFilename, ensureUniqueStoredFilenames } from "./filename.js";
 import { ensureDirectory, safeFileExtension, sha256Hex, validateSourceFilename, writeFileAtomic } from "./fs.js";
 import { normalizeCompact, normalizeForMatching } from "./textNormalization.js";
@@ -726,17 +727,38 @@ export async function classifyDocuments(params: {
   ensureDirectory(params.ocrDirectory);
   ensureDirectory(params.llmResultsDirectory);
 
+  const useHybrid = params.config.processing?.mode === "hybrid";
+
   for (const item of params.uniqueDocuments) {
-    const extraction = await extractDocumentText({
-      sha256: item.sha256,
-      localPath: item.localPath,
-      textDirectory: params.textDirectory,
-      ocrDirectory: params.ocrDirectory,
-      isPdf: item.isPdf,
-      isImage: item.isImage ?? false,
-      ocrEnabled: params.config.ocrEnabled ?? true,
-      ocrLanguages: params.config.ocrLanguages ?? ["slk", "ces", "eng"],
-    });
+    const ocrEnabled = params.config.ocrEnabled ?? true;
+    const ocrLanguages = params.config.ocrLanguages ?? ["slk", "ces", "eng"];
+    // Heavy PDF parsing + OCR runs locally, or is offloaded to the Mac worker
+    // in hybrid mode; the (cheap) classification below is identical either way.
+    const extraction = useHybrid
+      ? await extractDocumentTextHybrid({
+        sha256: item.sha256,
+        localPath: item.localPath,
+        textDirectory: params.textDirectory,
+        ocrDirectory: params.ocrDirectory,
+        isPdf: item.isPdf,
+        isImage: item.isImage ?? false,
+        ocrEnabled,
+        ocrLanguages,
+        account: params.config.accountId,
+        period: params.period.period,
+        sourceEmail: params.config.sourceEmail,
+        receivedDate: item.sourceMessages[0]?.timestampIso ?? null,
+      }, params.config.processing)
+      : await extractDocumentText({
+        sha256: item.sha256,
+        localPath: item.localPath,
+        textDirectory: params.textDirectory,
+        ocrDirectory: params.ocrDirectory,
+        isPdf: item.isPdf,
+        isImage: item.isImage ?? false,
+        ocrEnabled,
+        ocrLanguages,
+      });
     const text = extraction.textPath && fs.existsSync(extraction.textPath)
       ? fs.readFileSync(extraction.textPath, "utf8")
       : extraction.ocrTextPath && fs.existsSync(extraction.ocrTextPath)

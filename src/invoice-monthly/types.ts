@@ -217,6 +217,16 @@ export type IngestionConfig = {
   nextMonthScanDays: number;
 };
 
+export type ProcessingConfig = {
+  /** "local" runs OCR/PDF parsing on the current machine; "hybrid" offloads it
+   *  to the Mac worker via a shared folder. */
+  mode: "local" | "hybrid";
+  incomingPath: string;
+  resultsPath: string;
+  pollIntervalMs: number;
+  timeoutMs: number;
+};
+
 export type MonthlyWorkflowConfig = {
   accountId: string;
   accountingIdentity: string;
@@ -254,6 +264,7 @@ export type MonthlyWorkflowConfig = {
   classification?: ClassificationRulesConfig;
   periodValidation: PeriodValidationConfig;
   ingestion: IngestionConfig;
+  processing: ProcessingConfig;
 };
 
 export type PeriodInfo = {

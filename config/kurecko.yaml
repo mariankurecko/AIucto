@@ -167,3 +167,18 @@ classification:
   visa_last_4: "8627"
   fuzzy_name_distance: 1
   short_receipt_text_threshold: 1000
+
+# Processing mode: where the heavy OCR + PDF text extraction runs.
+#   local  -> runs on this machine (default; unchanged behaviour)
+#   hybrid -> offloads extraction to the Mac worker via a shared folder.
+#            The Pi keeps doing Gmail scan, download, classification,
+#            Drive upload and Sheets; only PDF parsing + OCR move to the Mac.
+# To enable hybrid, set mode: hybrid and point the paths at the synced
+# /AIUCTO folder as seen FROM THIS (Raspberry Pi) machine, then run the
+# worker on the Mac (see worker/README.md).
+processing:
+  mode: local
+  # incoming_path: /AIUCTO/incoming
+  # results_path: /AIUCTO/results
+  # poll_interval_ms: 2000
+  # timeout_ms: 300000

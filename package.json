@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "invoice:monthly": "node --import tsx apps/cli/src/invoice-monthly.ts",
+    "worker:mac": "node --import tsx worker/worker.ts",
     "invoice:monthly-second-pass": "node --import tsx apps/cli/src/invoice-monthly-second-pass.ts",
     "invoice:cleanup-month": "node --import tsx apps/cli/src/invoice-cleanup-month.ts",
     "invoice:period-cleanup": "node --import tsx src/invoice-monthly/strictPeriodCleanup.ts",
@@ -21,6 +22,7 @@
     "google:authorize:invoice": "node --import tsx src/googleBootstrapAuthorize.ts"
   },
   "dependencies": {
+    "chokidar": "^4.0.3",
     "googleapis": "^173.0.0",
     "pdfjs-dist": "^6.1.200",
     "yaml": "^2.5.1",

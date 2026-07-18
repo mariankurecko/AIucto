@@ -17,6 +17,7 @@
     "apps/cli/**/*.ts",
     "packages/**/*.ts",
     "src/**/*.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "worker/**/*.ts"
   ]
 }
