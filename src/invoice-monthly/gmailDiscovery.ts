@@ -721,6 +721,7 @@ export async function classifyDocuments(params: {
   ocrDirectory: string;
   llmResultsDirectory: string;
   openrouter: import("./types.js").OpenRouterService;
+  routeByDocumentDate?: boolean;
 }): Promise<ClassifiedDocument[]> {
   const results: ClassifiedDocument[] = [];
   ensureDirectory(params.textDirectory);
@@ -783,7 +784,8 @@ export async function classifyDocuments(params: {
       keywordConfig: params.keywordConfig,
       extraction,
     });
-    applyPeriodValidation(classified, params.period, params.config);
+    const receivedDate = item.sourceMessages[0]?.localDate ?? item.sourceMessages[0]?.timestampIso?.slice(0, 10) ?? null;
+    applyPeriodValidation(classified, params.period, params.config, { routeByDocumentDate: params.routeByDocumentDate ?? false, receivedDate });
     classified.sourceMessages = item.sourceMessages;
     classified.duplicateOfSha256 = item.duplicateOfSha256;
     results.push(classified);

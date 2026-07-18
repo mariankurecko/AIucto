@@ -6,13 +6,13 @@ import { loadMonthlyConfig } from "./config.js";
 import { ensureDirectory, readJsonFile, writeJsonAtomic } from "./fs.js";
 import { createDeterministicZip, validateZipAgainstManifest } from "./zipPackage.js";
 import { buildManifest } from "./manifest.js";
-import { buildIncomingQuery, buildSentQuery, computePreviousCalendarMonth, periodFromString } from "./period.js";
+import { addDays, buildIncomingQuery, buildIncomingRangeQuery, buildSentQuery, buildSentRangeQuery, computePreviousCalendarMonth, periodFromString, periodStringFromDate } from "./period.js";
 import { buildRunDirectory, buildRunStatePath, initializeRunState, updateRunState } from "./runState.js";
 import { classifyDocuments, discoverPeriodAttachments, downloadAttachments, finalizeApprovedDocuments, mergeDownloadedAttachments } from "./gmailDiscovery.js";
-import { compareResultsWithDrive, syncApprovedDocumentsToDrive } from "./driveSync.js";
+import { compareDocumentsWithDrive, compareResultsWithDrive, syncApprovedDocumentsToDrive } from "./driveSync.js";
 import { ClassifiedDocument, InvoiceMonthlyServices, PackageStatus, PreparedEmail, SendRecord, WorkflowMode } from "./types.js";
 
-function parseArgs(argv: string[]): { account: string; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; } {
+function parseArgs(argv: string[]): { account: string; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; backfillReceivedFrom?: string; backfillReceivedTo?: string; routeByDocumentDate: boolean; } {
   function getArg(name: string): string | undefined {
     const index = argv.indexOf(`--${name}`);
     return index >= 0 ? argv[index + 1] : undefined;
@@ -27,6 +27,9 @@ function parseArgs(argv: string[]): { account: string; period?: string; dryRun: 
     forceReclassify: argv.includes("--force-reclassify"),
     ocr: argv.includes("--ocr"),
     reconcileDrive: argv.includes("--reconcile-drive"),
+    backfillReceivedFrom: getArg("backfill-received-from"),
+    backfillReceivedTo: getArg("backfill-received-to"),
+    routeByDocumentDate: argv.includes("--route-by-document-date"),
   };
 }
 
@@ -246,10 +249,162 @@ async function runDriveReconciliation(params: {
   };
 }
 
+/**
+ * Backfill / document-date routing mode. Discovers attachments across an explicit
+ * Gmail RECEIVED-date range for this inbox, classifies them, and routes each
+ * APPROVED document into the Drive month folder of its OWN document date
+ * (invoice/delivery date) — a May invoice received in June lands in 2026-05, not
+ * 2026-06. Review/uncertain documents are never silently approved. Deterministic:
+ * dedup by sha256, folder-scoped idempotent upload; re-running is a no-op.
+ */
+async function runBackfill(params: {
+  projectRoot: string;
+  config: ReturnType<typeof loadMonthlyConfig>;
+  services: InvoiceMonthlyServices;
+  keywordConfig: ReturnType<typeof loadKeywordConfig>;
+  args: ReturnType<typeof parseArgs>;
+}): Promise<{ status: PackageStatus; output: Record<string, unknown>; }> {
+  const { projectRoot, config, services, keywordConfig, args } = params;
+  const fromDate = args.backfillReceivedFrom!;
+  const toDate = args.backfillReceivedTo ?? new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate)) {
+    throw new Error(`--backfill-received-from/--backfill-received-to must be YYYY-MM-DD (got from='${fromDate}' to='${toDate}').`);
+  }
+  if (config.processing.mode === "hybrid") {
+    throw new Error("Backfill requires processing.mode 'local' (hybrid needs the Mac worker). Set mode: local for this account before running the backfill.");
+  }
+  const beforeExclusive = addDays(toDate, 1); // `to` is inclusive; Gmail `before:` is exclusive.
+
+  const runDirectory = buildRunDirectory(projectRoot, config.accountId, `backfill-${fromDate}_${toDate}`);
+  const downloadsDirectory = path.join(runDirectory, "downloads");
+  const textDirectory = path.join(runDirectory, "text");
+  const ocrDirectory = path.join(runDirectory, "ocr");
+  const llmResultsDirectory = path.join(runDirectory, "llm-results");
+  [runDirectory, downloadsDirectory, textDirectory, ocrDirectory, llmResultsDirectory].forEach((dir) => ensureDirectory(dir));
+
+  const representativePeriod = periodFromString(fromDate.slice(0, 7), config.timezone);
+  const incomingQuery = config.scanIncomingMail ? buildIncomingRangeQuery(fromDate, beforeExclusive) : null;
+  const sentQuery = config.scanSentMail ? buildSentRangeQuery(fromDate, beforeExclusive) : null;
+
+  const driveAuthorizedEmail = await services.drive.getAuthorizedEmail();
+  uploadLog("invoice.backfill.started", {
+    accountId: config.accountId,
+    sourceMailbox: config.sourceEmail,
+    driveAuthorizedEmail,
+    receivedFrom: fromDate,
+    receivedToInclusive: toDate,
+    incomingQuery,
+    sentQuery,
+  });
+
+  const incomingDiscovery = incomingQuery ? await discoverPeriodAttachments({ config, period: representativePeriod, gmail: services.gmailRead, query: incomingQuery, direction: "incoming" }) : { messages: [], attachments: [] };
+  const sentDiscovery = sentQuery ? await discoverPeriodAttachments({ config, period: representativePeriod, gmail: services.gmailRead, query: sentQuery, direction: "sent" }) : { messages: [], attachments: [] };
+  const allAttachments = [...incomingDiscovery.attachments, ...sentDiscovery.attachments];
+  const downloaded = await downloadAttachments({ attachments: allAttachments, gmail: services.gmailRead, downloadDirectory: downloadsDirectory });
+  const merged = mergeDownloadedAttachments(downloaded);
+
+  const classified = await classifyDocuments({
+    config: { ...config, ocrEnabled: config.ocrEnabled ?? true },
+    period: representativePeriod,
+    keywordConfig,
+    uniqueDocuments: merged.uniqueDocuments,
+    textDirectory,
+    ocrDirectory,
+    llmResultsDirectory,
+    openrouter: services.openrouter,
+    routeByDocumentDate: true,
+  });
+  writeJsonAtomic(path.join(runDirectory, "classified.json"), classified, 0o600);
+
+  // Group approved documents by their OWN document month (detectedPeriod).
+  const approvedAll = classified.filter((document) => document.finalDecision === "approved_accounting_document");
+  const byMonth = new Map<string, ClassifiedDocument[]>();
+  const approvedUndated: ClassifiedDocument[] = [];
+  for (const document of approvedAll) {
+    const month = document.detectedPeriod ?? periodStringFromDate(document.invoiceDate) ?? periodStringFromDate(document.deliveryDate);
+    if (!month) { approvedUndated.push(document); continue; }
+    const list = byMonth.get(month) ?? [];
+    list.push(document);
+    byMonth.set(month, list);
+  }
+
+  const runId = `backfill-${config.accountId}-${fromDate}_${toDate}`;
+  const perMonth: Array<Record<string, unknown>> = [];
+  let totalUploaded = 0, totalPresent = 0, totalFailed = 0, totalMissing = 0, totalExtra = 0;
+  for (const month of [...byMonth.keys()].sort()) {
+    const docs = byMonth.get(month)!;
+    const folderTree = await services.drive.ensureMonthlyFolder(config, periodFromString(month, config.timezone));
+    const summary = await syncApprovedDocumentsToDrive({ config, services, folderTree, runId, period: month, documents: docs, mode: "run" });
+    const audit = await compareDocumentsWithDrive({ services, accountId: config.accountId, period: month, folderTree, approved: docs, totalResults: docs.length });
+    totalUploaded += summary.uploaded_now;
+    totalPresent += summary.already_present;
+    totalFailed += summary.failed + summary.quota_deferred;
+    totalMissing += audit.missing_in_drive.length;
+    totalExtra += audit.extra_in_drive.length;
+    perMonth.push({ month, approvedFolderId: folderTree.approved?.id ?? folderTree.month.id, approved: docs.length, uploaded_now: summary.uploaded_now, already_present: summary.already_present, failed: summary.failed, quota_deferred: summary.quota_deferred, missing_in_drive: audit.missing_in_drive.length, extra_in_drive: audit.extra_in_drive.length });
+  }
+
+  const review = classified.filter((document) => document.finalDecision === "review_required");
+  const rejected = classified.filter((document) => !["approved_accounting_document", "review_required"].includes(document.finalDecision ?? "rejected_non_accounting"));
+  const ocrErrors = classified.filter((document) => ["parse_failed", "invalid_pdf", "ocr_unavailable", "needs_ocr", "encrypted_pdf"].includes(document.extractionStatus) || document.extractionMethod === "extraction_failed");
+  const missingDateDocs = classified.filter((document) => (document.warnings ?? []).includes("missing_document_date"));
+
+  console.log([
+    "",
+    `BACKFILL SUMMARY — ${config.accountId} (${config.sourceEmail})`,
+    `- received range:        ${fromDate} .. ${toDate} (inclusive)`,
+    `- attachments found:     ${allAttachments.length} (incoming ${incomingDiscovery.attachments.length}, sent ${sentDiscovery.attachments.length})`,
+    `- duplicates removed:    ${merged.duplicateCount}`,
+    `- unique classified:     ${classified.length}`,
+    `- approved:              ${approvedAll.length}`,
+    `- review / uncertain:    ${review.length}`,
+    `- rejected / not-company:${rejected.length}`,
+    `- OCR/extraction errors: ${ocrErrors.length}`,
+    `- missing document date: ${missingDateDocs.length}`,
+    `- approved without month:${approvedUndated.length}`,
+    "- approved per month folder:",
+    ...[...byMonth.keys()].sort().map((m) => `    ${m}: ${byMonth.get(m)!.length}`),
+    `- Drive: uploaded ${totalUploaded}, already_present ${totalPresent}, failed ${totalFailed}, missing ${totalMissing}, extra ${totalExtra}`,
+    "",
+  ].join("\n"));
+  if (totalMissing === 0 && totalFailed === 0) console.log("BACKFILL DRIVE SYNC IS DETERMINISTIC");
+
+  return {
+    status: "backfilled",
+    output: {
+      accountId: config.accountId,
+      sourceMailbox: config.sourceEmail,
+      receivedFrom: fromDate,
+      receivedToInclusive: toDate,
+      attachmentsFound: allAttachments.length,
+      incomingAttachments: incomingDiscovery.attachments.length,
+      sentAttachments: sentDiscovery.attachments.length,
+      duplicatesRemoved: merged.duplicateCount,
+      uniqueClassified: classified.length,
+      approved: approvedAll.length,
+      review: review.length,
+      rejected: rejected.length,
+      ocrErrors: ocrErrors.length,
+      missingDocumentDate: missingDateDocs.length,
+      approvedWithoutMonth: approvedUndated.length,
+      approvedPerMonth: Object.fromEntries([...byMonth.entries()].map(([m, d]) => [m, d.length])),
+      drive: { uploaded: totalUploaded, alreadyPresent: totalPresent, failed: totalFailed, missing: totalMissing, extra: totalExtra },
+      perMonth,
+    },
+  };
+}
+
 export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: InvoiceMonthlyServices, argv = process.argv.slice(2)): Promise<{ status: PackageStatus; output: Record<string, unknown>; }> {
   const args = parseArgs(argv);
   const config = loadMonthlyConfig(projectRoot, args.account);
   const keywordConfig = loadKeywordConfig(projectRoot, config.accountingKeywordsFile);
+
+  // Backfill / document-date routing mode — self-contained; skips the single-period
+  // package flow (no ZIP, no email) and routes approved docs by their document date.
+  if (args.backfillReceivedFrom) {
+    return runBackfill({ projectRoot, config, services, keywordConfig, args });
+  }
+
   const period = args.period ? periodFromString(args.period, config.timezone) : computePreviousCalendarMonth(new Date(), config.timezone);
   const mode: WorkflowMode = args.dryRun ? "dry_run" : args.prepareOnly ? "prepare_only" : args.confirmSend ? "confirmed_send" : "scheduled";
 

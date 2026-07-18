@@ -291,29 +291,20 @@ export async function syncApprovedDocumentsToDrive(params: {
 }
 
 /**
- * STEP 1 audit: compare classified results on disk with the actual Drive
- * "Approved Documents" folder. Matches by sha256 (preferred, stored as an
- * appProperty) and falls back to filename.
+ * Core audit: compare a set of approved documents against the actual Drive
+ * "Approved Documents" folder they should live in. Matches by sha256 (preferred,
+ * stored as an appProperty) and falls back to filename. Works from in-memory
+ * documents so both the disk-based audit and the backfill router can reuse it.
  */
-export async function compareResultsWithDrive(params: {
-  projectRoot: string;
+export async function compareDocumentsWithDrive(params: {
   services: InvoiceMonthlyServices;
-  config: MonthlyWorkflowConfig;
-  period: PeriodInfo;
-  folderTree?: DriveFolderTree;
+  accountId: string;
+  period: string;
+  folderTree: DriveFolderTree;
+  approved: ClassifiedDocument[];
+  totalResults: number;
 }): Promise<DriveAuditReport> {
-  const runDirectory = buildRunDirectory(params.projectRoot, params.config.accountId, params.period.period);
-  const classifiedPath = path.join(runDirectory, "classified.json");
-  let classified: ClassifiedDocument[] = [];
-  try {
-    classified = readJsonFile<ClassifiedDocument[]>(classifiedPath);
-  } catch {
-    driveLog("warn", "invoice.drive_audit.no_results", { classifiedPath });
-  }
-  const approved = classified.filter((document) => document.finalDecision === APPROVED_DECISION);
-
-  const folderTree = params.folderTree ?? await params.services.drive.ensureMonthlyFolder(params.config, params.period);
-  const approvedFolderId = approvedTargetFolderId(folderTree);
+  const approvedFolderId = approvedTargetFolderId(params.folderTree);
 
   let driveFiles: DriveFileRecord[] = [];
   if (params.services.drive.listFiles) {
@@ -324,9 +315,9 @@ export async function compareResultsWithDrive(params: {
 
   const driveBySha = new Set(driveFiles.map((file) => file.appProperties?.sha256).filter(Boolean) as string[]);
   const driveByName = new Set(driveFiles.map((file) => file.name));
-  const approvedShaSet = new Set(approved.map((document) => document.sha256));
+  const approvedShaSet = new Set(params.approved.map((document) => document.sha256));
 
-  const missing_in_drive = approved
+  const missing_in_drive = params.approved
     .filter((document) => !driveBySha.has(document.sha256) && !driveByName.has(driveDocumentFilename(document)))
     .map((document) => ({ sha256: document.sha256, filename: driveDocumentFilename(document) }));
 
@@ -337,19 +328,21 @@ export async function compareResultsWithDrive(params: {
     })
     .map((file) => ({ sha256: file.appProperties?.sha256 ?? null, name: file.name, driveFileId: file.id }));
 
-  const total_present_in_drive = approved.length - missing_in_drive.length;
+  const total_present_in_drive = params.approved.length - missing_in_drive.length;
 
   const report: DriveAuditReport = {
-    accountId: params.config.accountId,
-    period: params.period.period,
-    total_results: classified.length,
-    total_approved: approved.length,
+    accountId: params.accountId,
+    period: params.period,
+    total_results: params.totalResults,
+    total_approved: params.approved.length,
     total_present_in_drive,
     missing_in_drive,
     extra_in_drive,
   };
 
   driveLog(missing_in_drive.length > 0 ? "warn" : "info", "invoice.drive_audit.report", {
+    accountId: report.accountId,
+    period: report.period,
     total_results: report.total_results,
     total_approved: report.total_approved,
     total_present_in_drive: report.total_present_in_drive,
@@ -367,4 +360,36 @@ export async function compareResultsWithDrive(params: {
   }
 
   return report;
+}
+
+/**
+ * STEP 1 audit: compare classified results on disk with the actual Drive
+ * "Approved Documents" folder.
+ */
+export async function compareResultsWithDrive(params: {
+  projectRoot: string;
+  services: InvoiceMonthlyServices;
+  config: MonthlyWorkflowConfig;
+  period: PeriodInfo;
+  folderTree?: DriveFolderTree;
+}): Promise<DriveAuditReport> {
+  const runDirectory = buildRunDirectory(params.projectRoot, params.config.accountId, params.period.period);
+  const classifiedPath = path.join(runDirectory, "classified.json");
+  let classified: ClassifiedDocument[] = [];
+  try {
+    classified = readJsonFile<ClassifiedDocument[]>(classifiedPath);
+  } catch {
+    driveLog("warn", "invoice.drive_audit.no_results", { classifiedPath });
+  }
+  const approved = classified.filter((document) => document.finalDecision === APPROVED_DECISION);
+  const folderTree = params.folderTree ?? await params.services.drive.ensureMonthlyFolder(params.config, params.period);
+
+  return compareDocumentsWithDrive({
+    services: params.services,
+    accountId: params.config.accountId,
+    period: params.period.period,
+    folderTree,
+    approved,
+    totalResults: classified.length,
+  });
 }

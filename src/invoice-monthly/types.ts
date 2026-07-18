@@ -151,6 +151,7 @@ export type PackageStatus =
   | "sent"
   | "dry_run"
   | "reconciled"
+  | "backfilled"
   | "failed";
 
 export type CompanyIdentityConfig = {

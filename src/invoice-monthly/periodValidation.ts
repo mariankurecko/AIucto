@@ -70,11 +70,40 @@ export function validateDocumentPeriod(document: Pick<ClassifiedDocument, "invoi
   return { invoiceDate, deliveryDate, detectedPeriod, valid: false, usedFallbackDate, reason: "out_of_period" };
 }
 
-export function applyPeriodValidation(document: ClassifiedDocument, period: PeriodInfo, config: MonthlyWorkflowConfig): ClassifiedDocument {
+// A parsed invoice date more than this many days BEFORE the email's received
+// date is treated as implausible (almost always a contract/registration date
+// picked up from the body). Legitimate late invoices in practice arrive within
+// ~2-3 months; this leaves a wide safety margin.
+const IMPLAUSIBLE_BACKDATE_DAYS = 180;
+
+function daysBetween(laterIso: string, earlierIso: string): number {
+  return Math.round((Date.parse(laterIso) - Date.parse(earlierIso)) / 86_400_000);
+}
+
+export function applyPeriodValidation(document: ClassifiedDocument, period: PeriodInfo, config: MonthlyWorkflowConfig, options?: { routeByDocumentDate?: boolean; receivedDate?: string | null }): ClassifiedDocument {
+  const routeByDocumentDate = options?.routeByDocumentDate === true;
   const result = validateDocumentPeriod(document, period, config);
   document.invoiceDate = result.invoiceDate;
   document.deliveryDate = result.deliveryDate;
-  document.detectedPeriod = result.detectedPeriod;
+
+  // Routing guard: if the invoice date is implausibly older than the received
+  // date, it is almost certainly a misparse — route by the delivery date instead
+  // (when that one is plausible) and flag the document's date as uncertain. The
+  // raw parsed dates are still surfaced on the document for transparency; only the
+  // routing period (detectedPeriod) is corrected.
+  const received = options?.receivedDate && /^\d{4}-\d{2}-\d{2}$/.test(options.receivedDate) ? options.receivedDate : null;
+  let routingInvoiceDate = result.invoiceDate;
+  let dateUncertain = false;
+  if (received && result.invoiceDate && daysBetween(received, result.invoiceDate) > IMPLAUSIBLE_BACKDATE_DAYS) {
+    dateUncertain = true;
+    const deliveryPlausible = result.deliveryDate != null && daysBetween(received, result.deliveryDate) <= IMPLAUSIBLE_BACKDATE_DAYS;
+    if (deliveryPlausible) routingInvoiceDate = null; // fall through to delivery date for routing
+  }
+  document.detectedPeriod = periodStringFromDate(routingInvoiceDate) ?? periodStringFromDate(result.deliveryDate) ?? result.detectedPeriod;
+  if (dateUncertain) {
+    document.warnings = [...new Set([...(document.warnings ?? []), "uncertain_document_date"])];
+    document.validationReasons = [...new Set([...(document.validationReasons ?? []), "invoice_date_implausible"])];
+  }
   document.document = {
     ...(document.document ?? {
       documentNumber: null,
@@ -94,16 +123,25 @@ export function applyPeriodValidation(document: ClassifiedDocument, period: Peri
   document.taxableSupplyDate = result.deliveryDate;
   document.validationReasons = [...new Set([...(document.validationReasons ?? []), ...(result.valid ? ["period_validated"] : [])])];
 
-  if (result.reason === "missing_date") {
+  if (result.reason === "missing_date" && document.finalDecision === "approved_accounting_document") {
+    // Only demote to review_required if we were about to approve the document; rejections stand as-is.
+    // This holds in BOTH modes: a document with no usable date is never silently approved.
     document.finalDecision = "review_required";
     document.approvalStatus = "auto_approved_unverified";
     document.zipIncluded = false;
     document.warnings = [...new Set([...(document.warnings ?? []), "missing_document_date"])];
-  } else if (result.reason === "out_of_period") {
+  } else if (result.reason === "out_of_period" && !routeByDocumentDate) {
+    // Single-period mode: a document dated outside the run's month is not part of
+    // this package.
     document.finalDecision = "rejected_non_accounting";
     document.approvalStatus = "excluded_non_accounting";
     document.zipIncluded = false;
     document.rejectionReasons = [...new Set([...(document.rejectionReasons ?? []), "out_of_period"])];
+  } else if (result.reason === "out_of_period" && routeByDocumentDate) {
+    // Backfill / route-by-document-date mode: the document is valid, it simply
+    // belongs to a different month. Keep the classification decision and let the
+    // caller route it to its detectedPeriod folder (e.g. a May invoice -> 2026-05).
+    document.validationReasons = [...new Set([...(document.validationReasons ?? []), "routed_by_document_date"])];
   }
 
   return document;

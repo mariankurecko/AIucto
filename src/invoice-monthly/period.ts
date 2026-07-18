@@ -107,6 +107,11 @@ export function isInternalDateInPeriod(
   return localDate >= period.startDate && localDate < period.endExclusiveDate;
 }
 
+// Attachment-type filter shared by discovery queries. Matches every type the
+// pipeline can process (PDF + common image formats) so image-only invoices are
+// not dropped at the Gmail search layer. Keywords remain signal-only.
+const ATTACHMENT_FILENAME_FILTER = "(filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp OR filename:heic OR filename:heif)";
+
 export function buildIncomingQuery(period: PeriodInfo, nextMonthScanDays = 15): string {
   const scanBefore = addDays(period.endExclusiveDate, nextMonthScanDays);
   return [
@@ -128,6 +133,33 @@ export function buildSentQuery(period: PeriodInfo, nextMonthScanDays = 15): stri
     `before:${scanBefore.replace(/-/g, "/")}`,
     "has:attachment",
     "filename:pdf",
+    "-in:spam",
+    "-in:trash",
+  ].join(" ");
+}
+
+// Backfill discovery over an explicit Gmail received-date range (received-date is
+// the ONLY search axis; documents are later routed to Drive by their own document
+// date). `afterDate` is inclusive, `beforeExclusiveDate` is exclusive — both YYYY-MM-DD.
+export function buildIncomingRangeQuery(afterDate: string, beforeExclusiveDate: string): string {
+  return [
+    `after:${afterDate.replace(/-/g, "/")}`,
+    `before:${beforeExclusiveDate.replace(/-/g, "/")}`,
+    "has:attachment",
+    ATTACHMENT_FILENAME_FILTER,
+    "-in:sent",
+    "-in:spam",
+    "-in:trash",
+  ].join(" ");
+}
+
+export function buildSentRangeQuery(afterDate: string, beforeExclusiveDate: string): string {
+  return [
+    "in:sent",
+    `after:${afterDate.replace(/-/g, "/")}`,
+    `before:${beforeExclusiveDate.replace(/-/g, "/")}`,
+    "has:attachment",
+    ATTACHMENT_FILENAME_FILTER,
     "-in:spam",
     "-in:trash",
   ].join(" ");
