@@ -12,13 +12,14 @@ import { classifyDocuments, discoverPeriodAttachments, downloadAttachments, fina
 import { compareDocumentsWithDrive, compareResultsWithDrive, syncApprovedDocumentsToDrive } from "./driveSync.js";
 import { ClassifiedDocument, InvoiceMonthlyServices, PackageStatus, PreparedEmail, SendRecord, WorkflowMode } from "./types.js";
 
-function parseArgs(argv: string[]): { account: string; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; backfillReceivedFrom?: string; backfillReceivedTo?: string; routeByDocumentDate: boolean; } {
+function parseArgs(argv: string[]): { account: string; includeAccounts: string[]; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; backfillReceivedFrom?: string; backfillReceivedTo?: string; routeByDocumentDate: boolean; } {
   function getArg(name: string): string | undefined {
     const index = argv.indexOf(`--${name}`);
     return index >= 0 ? argv[index + 1] : undefined;
   }
   return {
     account: getArg("account") ?? "equisix",
+    includeAccounts: argv.flatMap((value, index) => value === "--include-account" && argv[index + 1] ? [argv[index + 1]] : []),
     period: getArg("period"),
     dryRun: argv.includes("--dry-run"),
     prepareOnly: argv.includes("--prepare-only"),
@@ -398,6 +399,10 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const args = parseArgs(argv);
   const config = loadMonthlyConfig(projectRoot, args.account);
   const keywordConfig = loadKeywordConfig(projectRoot, config.accountingKeywordsFile);
+  const consolidated = args.includeAccounts.length > 0;
+  if (consolidated && args.backfillReceivedFrom) {
+    throw new Error("--include-account consolidated mode cannot be combined with backfill mode.");
+  }
 
   // Backfill / document-date routing mode — self-contained; skips the single-period
   // package flow (no ZIP, no email) and routes approved docs by their document date.
@@ -408,7 +413,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const period = args.period ? periodFromString(args.period, config.timezone) : computePreviousCalendarMonth(new Date(), config.timezone);
   const mode: WorkflowMode = args.dryRun ? "dry_run" : args.prepareOnly ? "prepare_only" : args.confirmSend ? "confirmed_send" : "scheduled";
 
-  const runDirectory = buildRunDirectory(projectRoot, config.accountId, period.period);
+  const runDirectory = buildRunDirectory(projectRoot, config.accountId, consolidated ? `consolidated-${period.period}` : period.period);
   ensureDirectory(runDirectory);
   const state = initializeRunState({ runDirectory, accountId: config.accountId, period: period.period, mode, forcedResend: args.forceResend });
   let currentState = state;
@@ -431,7 +436,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const sentQuery = config.scanSentMail ? buildSentQuery(period, config.ingestion.nextMonthScanDays) : null;
 
   if (args.dryRun) {
-    return { status: "dry_run", output: { period: period.period, incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
+    return { status: "dry_run", output: { period: period.period, consolidated, sourceAccounts: [config.accountId, ...args.includeAccounts], incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
   }
 
   // STEP 3 — Force reconciliation mode. Skips Gmail scan and OCR entirely and
@@ -471,7 +476,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const merged = mergeDownloadedAttachments(downloaded);
   currentState = updateRunState(statePath, currentState, { stage: "duplicates_resolved" });
 
-  const classified = await classifyDocuments({ config: { ...config, ocrEnabled: args.ocr ? config.ocrEnabled : false }, period, keywordConfig, uniqueDocuments: merged.uniqueDocuments, textDirectory, ocrDirectory, llmResultsDirectory, openrouter: services.openrouter });
+  const classified = await classifyDocuments({ config: { ...config, ocrEnabled: args.ocr ? config.ocrEnabled : false }, period, keywordConfig, uniqueDocuments: merged.uniqueDocuments, textDirectory, ocrDirectory, llmResultsDirectory, openrouter: services.openrouter, routeByDocumentDate: consolidated });
   for (const document of classified) {
     uploadLog("invoice.document.processed", {
       sha256: document.sha256,
@@ -491,28 +496,46 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   currentState = updateRunState(statePath, currentState, { stage: "classified" });
 
   const finalDocuments = finalizeApprovedDocuments(classified);
+  const packageClassified = consolidated
+    ? classified.filter((document) => document.detectedPeriod === period.period)
+    : classified;
+  const packageFinalDocuments = consolidated ? finalizeApprovedDocuments(packageClassified) : finalDocuments;
   currentState = updateRunState(statePath, currentState, { stage: "approved", documentHashes: finalDocuments.approved.map((document) => document.sha256) });
 
   const folderTree = await services.drive.ensureMonthlyFolder(config, period);
   currentState = updateRunState(statePath, currentState, { stage: "drive_pdfs_uploaded", monthlyFolderId: folderTree.month.id, monthlyFolderUrl: folderTree.month.webViewLink });
 
-  const uploadStats = await uploadOriginalDocuments({
-    config,
-    services,
-    folderTree,
-    runId: currentState.runId,
-    period: period.period,
-    documents: classified,
-  });
-  let drivePdfsCreated = uploadStats.uploaded;
-  let drivePdfsReused = uploadStats.reused;
+  let drivePdfsCreated = 0;
+  let drivePdfsReused = 0;
+  let driveUploadFailed = 0;
+  const routingGroups = new Map<string, ClassifiedDocument[]>();
+  if (consolidated) {
+    for (const document of classified) {
+      const routingPeriod = document.detectedPeriod;
+      if (!routingPeriod) continue;
+      const group = routingGroups.get(routingPeriod) ?? [];
+      group.push(document);
+      routingGroups.set(routingPeriod, group);
+    }
+  } else {
+    routingGroups.set(period.period, classified);
+  }
+  for (const [routingPeriod, documents] of routingGroups) {
+    const routingTree = routingPeriod === period.period
+      ? folderTree
+      : await services.drive.ensureMonthlyFolder(config, periodFromString(routingPeriod, config.timezone));
+    const uploadStats = await uploadOriginalDocuments({ config, services, folderTree: routingTree, runId: currentState.runId, period: routingPeriod, documents });
+    drivePdfsCreated += uploadStats.uploaded;
+    drivePdfsReused += uploadStats.reused;
+    driveUploadFailed += uploadStats.failed;
+  }
   const allDocumentsForManifest: ClassifiedDocument[] = mergeFinalizedDocuments({
-    classified,
-    finalized: finalDocuments,
+    classified: packageClassified,
+    finalized: packageFinalDocuments,
   });
   writeClassifiedOutputs(runDirectory, allDocumentsForManifest);
 
-  const manifest = buildManifest({ config, period: period.period, duplicateCount: merged.duplicateCount, excludedCount: finalDocuments.excludedCount, documents: allDocumentsForManifest, generatedAt: currentState.startedAt });
+  const manifest = buildManifest({ config, period: period.period, duplicateCount: merged.duplicateCount, excludedCount: packageFinalDocuments.excludedCount, documents: allDocumentsForManifest, generatedAt: currentState.startedAt });
   writeJsonAtomic(manifestPath, manifest, 0o600);
   writeJsonAtomic(classificationSummaryPath, {
     period: period.period,
@@ -540,13 +563,13 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const zipPath = path.join(packagesDirectory, zipName);
   const zipResult = createDeterministicZip({
     outputPath: zipPath,
-    pdfPathsByName: finalDocuments.approved.map((document) => ({ filename: document.safeStoredFilename, localPath: document.localPath })),
+    pdfPathsByName: packageFinalDocuments.approved.map((document) => ({ filename: document.safeStoredFilename, localPath: document.localPath })),
     manifestName: "manifest.json",
     manifestBuffer: Buffer.from(JSON.stringify(manifest, null, 2)),
   });
   currentState = updateRunState(statePath, currentState, { stage: "zip_created", zipPath: zipResult.zipPath, zipSha256: zipResult.sha256, zipBytes: zipResult.sizeBytes });
   validateZipAgainstManifest({
-    approvedHashes: finalDocuments.approved.map((document) => document.sha256),
+    approvedHashes: packageFinalDocuments.approved.map((document) => document.sha256),
     manifestHashes: manifest.documents.filter((document) => document.zipIncluded).map((document) => document.sha256),
     manifestPdfFilenames: manifest.documents.filter((document) => document.zipIncluded).map((document) => document.safeStoredFilename ?? "").filter(Boolean),
     zipPdfFilenames: zipResult.filenames.filter((name) => name !== "manifest.json"),
@@ -596,8 +619,8 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
     folderUrl: folderTree.month.webViewLink ?? "",
     zipUrl: zipUpload.webViewLink ?? "",
     registerUrl: invoiceRegisterUrl,
-    approvedCount: finalDocuments.approved.length,
-    reviewCount: finalDocuments.reviewRequired.length,
+    approvedCount: packageFinalDocuments.approved.length,
+    reviewCount: packageFinalDocuments.reviewRequired.length,
     incomingCount: incomingDiscovery.attachments.length,
     sentCount: sentDiscovery.attachments.length,
     bothDirectionsCount: merged.bothDirectionsCount,
@@ -633,7 +656,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       zipSha256: zipResult.sha256,
       monthlyFolderId: folderTree.month.id,
       zipDriveId: zipUpload.id,
-      documentHashes: finalDocuments.approved.map((document) => document.sha256),
+      documentHashes: packageFinalDocuments.approved.map((document) => document.sha256),
       packageVersion: config.packageVersion,
       forceResend: args.forceResend,
     };
@@ -648,12 +671,14 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
 
   // STEP 1/4 — verify determinism at the end of every run: audit results vs Drive
   // and print the sync summary. Any gap is logged as "DRIVE SYNC GAP DETECTED".
-  const driveAudit = await compareResultsWithDrive({ projectRoot, services, config, period, folderTree });
+  const driveAudit = consolidated
+    ? await compareDocumentsWithDrive({ services, accountId: config.accountId, period: period.period, folderTree, approved: packageFinalDocuments.approved, totalResults: packageClassified.length })
+    : await compareResultsWithDrive({ projectRoot, services, config, period, folderTree });
   printDriveSyncSummary("run", {
     total_documents: classified.length,
     approved_documents: finalDocuments.approved.length,
-    uploaded_now: uploadStats.uploaded,
-    already_present: uploadStats.reused,
+    uploaded_now: drivePdfsCreated,
+    already_present: drivePdfsReused,
     missing_after_run: driveAudit.missing_in_drive.length,
   });
 
@@ -733,10 +758,10 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       recipient: config.accountantEmail,
       preparedEmailPath,
       emailSent: false,
-      uploadFailedCount: uploadStats.failed,
-      approvedCount: finalDocuments.approved.length,
-      reviewCount: finalDocuments.reviewRequired.length,
-      rejectedCount: finalDocuments.rejected.length,
+      uploadFailedCount: driveUploadFailed,
+      approvedCount: packageFinalDocuments.approved.length,
+      reviewCount: packageFinalDocuments.reviewRequired.length,
+      rejectedCount: packageFinalDocuments.rejected.length,
       driveMissingCount: driveAudit.missing_in_drive.length,
       drivePresentCount: driveAudit.total_present_in_drive,
     },

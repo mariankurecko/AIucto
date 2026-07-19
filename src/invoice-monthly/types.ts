@@ -755,6 +755,7 @@ export type SendRecord = {
 
 export type InvoiceMonthlyServices = {
   gmailRead: GmailReadService;
+  gmailSources?: Array<{ accountId: string; config: MonthlyWorkflowConfig; gmail: GmailReadService }>;
   drive: DriveService;
   sheets: SheetsService;
   openrouter: OpenRouterService;

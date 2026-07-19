@@ -317,15 +317,15 @@ test("monthly email idempotency and no real email during prepare-only workflow",
     },
   };
 
-  const prepared = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--period", "2026-06", "--prepare-only"]);
+  const prepared = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--include-account", "kurecko", "--period", "2026-06", "--prepare-only"]);
   assert.equal(prepared.status, "prepared");
   assert.equal(sentCount, 0);
 
-  const firstSend = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--period", "2026-06", "--confirm-send", "YES"]);
+  const firstSend = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--include-account", "kurecko", "--period", "2026-06", "--confirm-send", "YES"]);
   assert.equal(firstSend.status, "sent");
   assert.equal(sentCount, 1);
 
-  const secondSend = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--period", "2026-06", "--confirm-send", "YES"]);
+  const secondSend = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--include-account", "kurecko", "--period", "2026-06", "--confirm-send", "YES"]);
   assert.equal(secondSend.status, "already_sent");
   assert.equal(sentCount, 1);
 });
