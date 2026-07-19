@@ -217,6 +217,8 @@ export type PeriodValidationConfig = {
 
 export type IngestionConfig = {
   nextMonthScanDays: number;
+  scanReceivedFrom?: string;
+  scanReceivedTo?: string;
 };
 
 export type ProcessingConfig = {
@@ -523,6 +525,8 @@ export type ClassifiedDocument = {
   taxableSupplyDate?: string | null;
   invoiceDate?: string | null;
   deliveryDate?: string | null;
+  // Derived from a validated accounting-relevant document date, never Gmail receipt date.
+  accountingPeriod?: string | null;
   detectedPeriod?: string | null;
   dueDate?: string | null;
   amounts?: AmountFields;

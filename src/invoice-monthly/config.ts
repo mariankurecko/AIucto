@@ -68,6 +68,8 @@ const PeriodValidationSchema = z.object({
 
 const IngestionSchema = z.object({
   next_month_scan_days: z.number().int().min(0).max(31).default(15),
+  scan_received_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  scan_received_to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 }).default({});
 
 const ProcessingSchema = z.object({
@@ -228,6 +230,8 @@ export function loadMonthlyConfig(projectRoot: string, accountId: string): Month
     },
     ingestion: {
       nextMonthScanDays: ingestion.next_month_scan_days,
+      scanReceivedFrom: ingestion.scan_received_from,
+      scanReceivedTo: ingestion.scan_received_to,
     },
     processing: {
       mode: processing.mode,

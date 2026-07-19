@@ -330,6 +330,25 @@ test("monthly email idempotency and no real email during prepare-only workflow",
   assert.equal(sentCount, 1);
 });
 
+test("consolidated dry run separates received-date scan window from package period", async () => {
+  const root = tempDir();
+  fs.mkdirSync(path.join(root, "config"), { recursive: true });
+  fs.copyFileSync(path.join(process.cwd(), "config", "equisix.yaml"), path.join(root, "config", "equisix.yaml"));
+  fs.copyFileSync(path.join(process.cwd(), "config", "accounting-keywords.yaml"), path.join(root, "config", "accounting-keywords.yaml"));
+  const services = { gmailRead: {}, drive: {}, sheets: {}, openrouter: {} } as InvoiceMonthlyServices;
+  const result = await runInvoiceMonthlyWorkflow(root, services, ["--account", "equisix", "--include-account", "kurecko", "--period", "2026-06", "--scan-received-from", "2026-06-01", "--scan-received-to", "2026-07-20", "--dry-run"]);
+  assert.deepEqual(result.output, {
+    packagePeriod: "2026-06",
+    scanReceivedFrom: "2026-06-01",
+    scanReceivedTo: "2026-07-20",
+    consolidated: true,
+    sourceAccounts: ["equisix", "kurecko"],
+    incomingQuery: "after:2026/06/01 before:2026/07/20 has:attachment (filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp OR filename:heic OR filename:heif) -in:sent -in:spam -in:trash",
+    sentQuery: "in:sent after:2026/06/01 before:2026/07/20 has:attachment (filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp OR filename:heic OR filename:heif) -in:spam -in:trash",
+    accountantEmail: "hello@equisix.com",
+  });
+});
+
 test("monthly second-pass processes only the stored monthly folder and writes route files", async () => {
   const root = tempDir();
   fs.mkdirSync(path.join(root, "config"), { recursive: true });

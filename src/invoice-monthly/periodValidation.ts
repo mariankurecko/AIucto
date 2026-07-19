@@ -5,13 +5,16 @@ import { ClassifiedDocument, DriveFolderTree, DriveService, ManifestDocumentReco
 type PeriodDateInfo = {
   invoiceDate: string | null;
   deliveryDate: string | null;
+  accountingDate: string | null;
+  accountingPeriod: string | null;
   detectedPeriod: string | null;
+  invalidDate: boolean;
 };
 
 export type PeriodValidationResult = PeriodDateInfo & {
   valid: boolean;
   usedFallbackDate: boolean;
-  reason: "ok" | "out_of_period" | "missing_date";
+  reason: "ok" | "out_of_period" | "missing_date" | "invalid_date";
 };
 
 export type PeriodCleanupAction = {
@@ -29,45 +32,67 @@ function normalizeDate(value: string | null | undefined): string | null {
   const match = value.match(/\b(20\d{2})[./-](\d{1,2})[./-](\d{1,2})\b/);
   if (!match) return null;
   const [, year, month, day] = match;
-  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  const parsed = new Date(`${normalized}T00:00:00.000Z`);
+  if (
+    parsed.getUTCFullYear() !== Number(year)
+    || parsed.getUTCMonth() + 1 !== Number(month)
+    || parsed.getUTCDate() !== Number(day)
+  ) return null;
+  return normalized;
 }
 
-export function documentPeriodDates(document: Pick<ClassifiedDocument, "invoiceDate" | "deliveryDate" | "detectedPeriod" | "issueDate" | "taxableSupplyDate" | "document">): PeriodDateInfo {
-  const invoiceDate = normalizeDate(document.invoiceDate ?? document.document?.issueDate ?? document.issueDate ?? null);
-  const deliveryDate = normalizeDate(document.deliveryDate ?? document.document?.taxableSupplyDate ?? document.taxableSupplyDate ?? null);
-  const detectedPeriod = document.detectedPeriod
-    ?? periodStringFromDate(invoiceDate)
-    ?? periodStringFromDate(deliveryDate)
-    ?? null;
-  return { invoiceDate, deliveryDate, detectedPeriod };
+function hasInvalidDate(value: string | null | undefined): boolean {
+  return Boolean(value && /\b20\d{2}[./-]\d{1,2}[./-]\d{1,2}\b/.test(value) && !normalizeDate(value));
+}
+
+function hasInvalidPeriod(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const match = value.match(/^(\d{4})-(\d{2})$/);
+  return !match || Number(match[2]) < 1 || Number(match[2]) > 12;
+}
+
+export function documentPeriodDates(document: Pick<ClassifiedDocument, "invoiceDate" | "deliveryDate" | "accountingPeriod" | "detectedPeriod" | "issueDate" | "taxableSupplyDate" | "document">): PeriodDateInfo {
+  const rawInvoiceDate = document.invoiceDate ?? document.document?.issueDate ?? document.issueDate ?? null;
+  const rawDeliveryDate = document.deliveryDate ?? document.document?.taxableSupplyDate ?? document.taxableSupplyDate ?? null;
+  const invoiceDate = normalizeDate(rawInvoiceDate);
+  const deliveryDate = normalizeDate(rawDeliveryDate);
+  // For receipts, the extracted issue date represents the transaction date. For
+  // invoices, taxable supply/delivery is the accounting date when available.
+  const accountingDate = deliveryDate ?? invoiceDate;
+  const accountingPeriod = periodStringFromDate(accountingDate);
+  return {
+    invoiceDate,
+    deliveryDate,
+    accountingDate,
+    accountingPeriod,
+    detectedPeriod: accountingPeriod,
+    invalidDate: hasInvalidDate(rawInvoiceDate) || hasInvalidDate(rawDeliveryDate) || hasInvalidPeriod(document.accountingPeriod ?? document.detectedPeriod),
+  };
 }
 
 export function manifestPeriodDates(document: Pick<ManifestDocumentRecord, "invoiceDate" | "deliveryDate" | "detectedPeriod" | "document">): PeriodDateInfo {
-  const invoiceDate = normalizeDate(document.invoiceDate ?? document.document?.issueDate ?? null);
-  const deliveryDate = normalizeDate(document.deliveryDate ?? document.document?.taxableSupplyDate ?? null);
-  const detectedPeriod = document.detectedPeriod
-    ?? periodStringFromDate(invoiceDate)
-    ?? periodStringFromDate(deliveryDate)
-    ?? null;
-  return { invoiceDate, deliveryDate, detectedPeriod };
+  return documentPeriodDates(document);
 }
 
-export function validateDocumentPeriod(document: Pick<ClassifiedDocument, "invoiceDate" | "deliveryDate" | "detectedPeriod" | "issueDate" | "taxableSupplyDate" | "document">, period: PeriodInfo, config: MonthlyWorkflowConfig): PeriodValidationResult {
-  const { invoiceDate, deliveryDate, detectedPeriod } = documentPeriodDates(document);
+export function validateDocumentPeriod(document: Pick<ClassifiedDocument, "invoiceDate" | "deliveryDate" | "accountingPeriod" | "detectedPeriod" | "issueDate" | "taxableSupplyDate" | "document">, period: PeriodInfo, config: MonthlyWorkflowConfig): PeriodValidationResult {
+  const result = documentPeriodDates(document);
+  const { invoiceDate, deliveryDate, accountingDate, accountingPeriod, detectedPeriod, invalidDate } = result;
   const invoiceInPeriod = dateBelongsToPeriod(invoiceDate, period);
   const deliveryInPeriod = dateBelongsToPeriod(deliveryDate, period);
   const usedFallbackDate = !invoiceInPeriod && deliveryInPeriod;
 
   if (!config.periodValidation.enabled) {
-    return { invoiceDate, deliveryDate, detectedPeriod, valid: true, usedFallbackDate, reason: "ok" };
+    return { ...result, valid: true, usedFallbackDate, reason: "ok" };
   }
+  if (invalidDate) return { invoiceDate, deliveryDate, accountingDate, accountingPeriod, detectedPeriod, invalidDate, valid: false, usedFallbackDate: false, reason: "invalid_date" };
   if (!invoiceDate && !deliveryDate) {
-    return { invoiceDate, deliveryDate, detectedPeriod, valid: false, usedFallbackDate: false, reason: "missing_date" };
+    return { invoiceDate, deliveryDate, accountingDate, accountingPeriod, detectedPeriod, invalidDate, valid: false, usedFallbackDate: false, reason: "missing_date" };
   }
   if (invoiceInPeriod || deliveryInPeriod) {
-    return { invoiceDate, deliveryDate, detectedPeriod, valid: true, usedFallbackDate, reason: "ok" };
+    return { invoiceDate, deliveryDate, accountingDate, accountingPeriod, detectedPeriod, invalidDate, valid: true, usedFallbackDate, reason: "ok" };
   }
-  return { invoiceDate, deliveryDate, detectedPeriod, valid: false, usedFallbackDate, reason: "out_of_period" };
+  return { invoiceDate, deliveryDate, accountingDate, accountingPeriod, detectedPeriod, invalidDate, valid: false, usedFallbackDate, reason: "out_of_period" };
 }
 
 // A parsed invoice date more than this many days BEFORE the email's received
@@ -92,14 +117,16 @@ export function applyPeriodValidation(document: ClassifiedDocument, period: Peri
   // raw parsed dates are still surfaced on the document for transparency; only the
   // routing period (detectedPeriod) is corrected.
   const received = options?.receivedDate && /^\d{4}-\d{2}-\d{2}$/.test(options.receivedDate) ? options.receivedDate : null;
-  let routingInvoiceDate = result.invoiceDate;
+  let routingAccountingDate = result.accountingDate;
   let dateUncertain = false;
-  if (received && result.invoiceDate && daysBetween(received, result.invoiceDate) > IMPLAUSIBLE_BACKDATE_DAYS) {
+  if (received && routingAccountingDate && daysBetween(received, routingAccountingDate) > IMPLAUSIBLE_BACKDATE_DAYS) {
     dateUncertain = true;
-    const deliveryPlausible = result.deliveryDate != null && daysBetween(received, result.deliveryDate) <= IMPLAUSIBLE_BACKDATE_DAYS;
-    if (deliveryPlausible) routingInvoiceDate = null; // fall through to delivery date for routing
+    routingAccountingDate = null;
   }
-  document.detectedPeriod = periodStringFromDate(routingInvoiceDate) ?? periodStringFromDate(result.deliveryDate) ?? result.detectedPeriod;
+  // Any invalid calendar value makes date extraction unreliable. Do not route
+  // an otherwise-approved document using a different incidental date.
+  document.accountingPeriod = result.invalidDate ? null : periodStringFromDate(routingAccountingDate);
+  document.detectedPeriod = document.accountingPeriod;
   if (dateUncertain) {
     document.warnings = [...new Set([...(document.warnings ?? []), "uncertain_document_date"])];
     document.validationReasons = [...new Set([...(document.validationReasons ?? []), "invoice_date_implausible"])];
@@ -123,13 +150,14 @@ export function applyPeriodValidation(document: ClassifiedDocument, period: Peri
   document.taxableSupplyDate = result.deliveryDate;
   document.validationReasons = [...new Set([...(document.validationReasons ?? []), ...(result.valid ? ["period_validated"] : [])])];
 
-  if (result.reason === "missing_date" && document.finalDecision === "approved_accounting_document") {
+  if ((result.reason === "missing_date" || result.reason === "invalid_date" || !document.accountingPeriod || dateUncertain) && document.finalDecision === "approved_accounting_document") {
     // Only demote to review_required if we were about to approve the document; rejections stand as-is.
     // This holds in BOTH modes: a document with no usable date is never silently approved.
     document.finalDecision = "review_required";
     document.approvalStatus = "auto_approved_unverified";
     document.zipIncluded = false;
-    document.warnings = [...new Set([...(document.warnings ?? []), "missing_document_date"])];
+    document.warnings = [...new Set([...(document.warnings ?? []), result.reason === "invalid_date" ? "invalid_document_date" : !document.accountingPeriod ? "missing_accounting_period" : "uncertain_document_date"])];
+    document.validationReasons = [...new Set([...(document.validationReasons ?? []), result.reason === "invalid_date" ? "invalid_routing_period" : "missing_accounting_period"])];
   } else if (result.reason === "out_of_period" && !routeByDocumentDate) {
     // Single-period mode: a document dated outside the run's month is not part of
     // this package.

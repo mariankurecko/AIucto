@@ -12,7 +12,7 @@ import { classifyDocuments, discoverPeriodAttachments, downloadAttachments, fina
 import { compareDocumentsWithDrive, compareResultsWithDrive, syncApprovedDocumentsToDrive } from "./driveSync.js";
 import { ClassifiedDocument, InvoiceMonthlyServices, PackageStatus, PreparedEmail, SendRecord, WorkflowMode } from "./types.js";
 
-function parseArgs(argv: string[]): { account: string; includeAccounts: string[]; period?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; backfillReceivedFrom?: string; backfillReceivedTo?: string; routeByDocumentDate: boolean; } {
+function parseArgs(argv: string[]): { account: string; includeAccounts: string[]; period?: string; scanReceivedFrom?: string; scanReceivedTo?: string; dryRun: boolean; prepareOnly: boolean; confirmSend: boolean; forceResend: boolean; forceReclassify: boolean; ocr: boolean; reconcileDrive: boolean; backfillReceivedFrom?: string; backfillReceivedTo?: string; routeByDocumentDate: boolean; } {
   function getArg(name: string): string | undefined {
     const index = argv.indexOf(`--${name}`);
     return index >= 0 ? argv[index + 1] : undefined;
@@ -21,6 +21,8 @@ function parseArgs(argv: string[]): { account: string; includeAccounts: string[]
     account: getArg("account") ?? "equisix",
     includeAccounts: argv.flatMap((value, index) => value === "--include-account" && argv[index + 1] ? [argv[index + 1]] : []),
     period: getArg("period"),
+    scanReceivedFrom: getArg("scan-received-from"),
+    scanReceivedTo: getArg("scan-received-to"),
     dryRun: argv.includes("--dry-run"),
     prepareOnly: argv.includes("--prepare-only"),
     confirmSend: getArg("confirm-send") === "YES",
@@ -411,6 +413,11 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   }
 
   const period = args.period ? periodFromString(args.period, config.timezone) : computePreviousCalendarMonth(new Date(), config.timezone);
+  const scanReceivedFrom = args.scanReceivedFrom ?? config.ingestion.scanReceivedFrom ?? period.startDate;
+  const scanReceivedTo = args.scanReceivedTo ?? config.ingestion.scanReceivedTo ?? addDays(period.endExclusiveDate, config.ingestion.nextMonthScanDays);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(scanReceivedFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(scanReceivedTo) || scanReceivedFrom >= scanReceivedTo) {
+    throw new Error(`--scan-received-from/--scan-received-to must be an ordered YYYY-MM-DD range (got from='${scanReceivedFrom}' to='${scanReceivedTo}').`);
+  }
   const mode: WorkflowMode = args.dryRun ? "dry_run" : args.prepareOnly ? "prepare_only" : args.confirmSend ? "confirmed_send" : "scheduled";
 
   const runDirectory = buildRunDirectory(projectRoot, config.accountId, consolidated ? `consolidated-${period.period}` : period.period);
@@ -432,11 +439,16 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   const packagesDirectory = path.join(runDirectory, "package");
   [downloadsDirectory, textDirectory, ocrDirectory, llmResultsDirectory, packagesDirectory].forEach((dir) => ensureDirectory(dir));
 
-  const incomingQuery = config.scanIncomingMail ? buildIncomingQuery(period, config.ingestion.nextMonthScanDays) : null;
-  const sentQuery = config.scanSentMail ? buildSentQuery(period, config.ingestion.nextMonthScanDays) : null;
+  const useExplicitScanRange = Boolean(args.scanReceivedFrom || args.scanReceivedTo || config.ingestion.scanReceivedFrom || config.ingestion.scanReceivedTo);
+  const incomingQuery = config.scanIncomingMail
+    ? useExplicitScanRange ? buildIncomingRangeQuery(scanReceivedFrom, scanReceivedTo) : buildIncomingQuery(period, config.ingestion.nextMonthScanDays)
+    : null;
+  const sentQuery = config.scanSentMail
+    ? useExplicitScanRange ? buildSentRangeQuery(scanReceivedFrom, scanReceivedTo) : buildSentQuery(period, config.ingestion.nextMonthScanDays)
+    : null;
 
   if (args.dryRun) {
-    return { status: "dry_run", output: { period: period.period, consolidated, sourceAccounts: [config.accountId, ...args.includeAccounts], incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
+    return { status: "dry_run", output: { packagePeriod: period.period, scanReceivedFrom, scanReceivedTo, consolidated, sourceAccounts: [config.accountId, ...args.includeAccounts], incomingQuery, sentQuery, accountantEmail: config.accountantEmail } };
   }
 
   // STEP 3 — Force reconciliation mode. Skips Gmail scan and OCR entirely and
@@ -461,7 +473,9 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
     driveAuthorizedEmail,
     driveRootName: config.driveRootName,
     driveRootFolderId: config.driveRootFolderId ?? null,
-    period: period.period,
+    packagePeriod: period.period,
+    scanReceivedFrom,
+    scanReceivedTo,
   });
 
   const incomingDiscovery = incomingQuery ? await discoverPeriodAttachments({ config, period, gmail: services.gmailRead, query: incomingQuery, direction: "incoming" }) : { messages: [], attachments: [] };
@@ -484,6 +498,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
       deduplicated: document.sourceMessages.length > 1,
       finalDecision: document.finalDecision ?? null,
+      accountingPeriod: document.accountingPeriod ?? null,
       keyword_found: document.keywordDetection?.keywordFound ?? false,
       keyword_source: document.keywordDetection?.keywordSource ?? "none",
       keyword_fields: document.keywordDetection?.matchedFields ?? [],
@@ -497,7 +512,7 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
 
   const finalDocuments = finalizeApprovedDocuments(classified);
   const packageClassified = consolidated
-    ? classified.filter((document) => document.detectedPeriod === period.period)
+    ? classified.filter((document) => document.accountingPeriod === period.period)
     : classified;
   const packageFinalDocuments = consolidated ? finalizeApprovedDocuments(packageClassified) : finalDocuments;
   currentState = updateRunState(statePath, currentState, { stage: "approved", documentHashes: finalDocuments.approved.map((document) => document.sha256) });
@@ -510,8 +525,8 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
   let driveUploadFailed = 0;
   const routingGroups = new Map<string, ClassifiedDocument[]>();
   if (consolidated) {
-    for (const document of classified) {
-      const routingPeriod = document.detectedPeriod;
+    for (const document of finalDocuments.approved) {
+      const routingPeriod = document.accountingPeriod;
       if (!routingPeriod) continue;
       const group = routingGroups.get(routingPeriod) ?? [];
       group.push(document);

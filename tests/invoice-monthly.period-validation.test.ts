@@ -110,6 +110,26 @@ test("period validation uses delivery date fallback when enabled", () => {
   assert.equal(document.finalDecision, "approved_accounting_document");
   assert.equal(document.deliveryDate, "2026-06-15");
   assert.equal(document.detectedPeriod, "2026-06");
+  assert.equal(document.accountingPeriod, "2026-06");
+});
+
+test("invalid calendar dates are never approved or routed", () => {
+  const root = tempProject();
+  const config = loadMonthlyConfig(root, "kurecko");
+  const period = periodFromString("2026-06", config.timezone);
+  const document = sampleDocument({
+    issueDate: "2025-14-08",
+    invoiceDate: "2025-14-08",
+    deliveryDate: null,
+    taxableSupplyDate: null,
+    detectedPeriod: "2025-14",
+  });
+  applyPeriodValidation(document, period, config, { routeByDocumentDate: true });
+  assert.equal(document.finalDecision, "review_required");
+  assert.equal(document.accountingPeriod, null);
+  assert.equal(document.detectedPeriod, null);
+  assert.match((document.warnings ?? []).join(","), /invalid_document_date/);
+  assert.match((document.validationReasons ?? []).join(","), /invalid_routing_period/);
 });
 
 test("strict period cleanup rewrites approved outputs and manifest counts", async () => {
