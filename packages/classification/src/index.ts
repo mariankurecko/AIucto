@@ -100,8 +100,12 @@ export function detectDocumentType(params: {
     /\b(ico|dic|ic dph|vat id)\b/i.test(normalized),
     /\b(total|spolu|celkom|na uhradu)\b/i.test(normalized),
   ].filter(Boolean).length;
-  const hasReceiptKeywords = receiptRegex.test(normalized);
-  const hasInvoiceKeywords = invoiceRegex.test(normalized);
+  // OCR can split a heading into characters (for example "F A K T U R A").
+  // Compare compact forms as well so a genuine invoice is not downgraded to
+  // "other" solely because of that layout artifact.
+  const compactNormalized = normalizeCompact(text);
+  const hasReceiptKeywords = receiptRegex.test(normalized) || rules.receiptKeywords.some((keyword) => compactNormalized.includes(normalizeCompact(keyword)));
+  const hasInvoiceKeywords = invoiceRegex.test(normalized) || rules.invoiceKeywords.some((keyword) => compactNormalized.includes(normalizeCompact(keyword)));
   const hasReceiptTaxPatterns = receiptTaxRegex.test(normalized);
   const hasStructuredInvoiceFields = sectionCount >= 3;
   const shortOcrLikeText = charCount > 0 && charCount < rules.shortReceiptTextThreshold;
@@ -326,7 +330,8 @@ export function buildClassification(params: {
   const normalized = normalizeForMatching(params.text);
   const compact = normalizeCompact(params.text);
   const invoiceDate = parseDate(params.text);
-  const deliveryDate = firstMatch(params.text, /\b(?:datum dodania|taxable supply date)\s*[:\-]?\s*(20\d{2}[./-]\d{1,2}[./-]\d{1,2})/i);
+  const rawDeliveryContext = firstMatch(params.text, /\b(?:den dodania|deň dodania|datum dodania|dátum dodania|taxable supply date|delivery date)\s*[:\-]?\s*(.{0,60})/i);
+  const deliveryDate = rawDeliveryContext ? parseDate(rawDeliveryContext) : null;
   const detectedPeriod = (invoiceDate ?? deliveryDate)?.slice(0, 7) ?? null;
   const totalAmount = firstMatch(params.text, /\b(?:total|spolu|na uhradu)\s*[:\-]?\s*([0-9]+[.,][0-9]{2})/i);
   const currency = firstMatch(params.text, /\b(EUR|CZK|USD|GBP|HUF|PLN)\b/i)?.toUpperCase() ?? null;

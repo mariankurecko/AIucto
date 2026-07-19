@@ -8,10 +8,12 @@ import { validatePdfFile } from "../src/invoice-monthly/pdfValidation.js";
 import { createDeterministicZip, validateZipAgainstManifest } from "../src/invoice-monthly/zipPackage.js";
 import { discoverPeriodAttachments, mergeDownloadedAttachments } from "../src/invoice-monthly/gmailDiscovery.js";
 import { loadMonthlyConfig } from "../src/invoice-monthly/config.js";
+import { loadKeywordConfig } from "../src/invoice-monthly/accountingKeywords.js";
 import { periodFromString } from "../src/invoice-monthly/period.js";
 import { initializeRunState, updateRunState } from "../src/invoice-monthly/runState.js";
 import { runMonthlySecondPass } from "../src/invoice-monthly/secondPass.js";
 import { runInvoiceMonthlyWorkflow } from "../src/invoice-monthly/workflow.js";
+import { buildClassification } from "../packages/classification/src/index.js";
 import { InvoiceMonthlyServices } from "../src/invoice-monthly/types.js";
 
 function tempDir(): string {
@@ -94,6 +96,19 @@ test("discovery excludes unsupported attachments even when the email body has in
   };
   const result = await discoverPeriodAttachments({ config, period: periodFromString("2026-06", config.timezone), gmail: gmail as any, query: "has:attachment", direction: "incoming" });
   assert.equal(result.attachments.length, 0);
+});
+
+test("OCR-spaced invoice heading classifies an invoice independently of report attachments", () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const keywordConfig = loadKeywordConfig(process.cwd(), "config/accounting-keywords.yaml");
+  const source = { messageId: "m1", threadId: "t1", direction: "incoming" as const, mailbox: "kurecko@gmail.com", from: "sender@example.com", recipients: ["hello@equisix.com"], subject: "Faktura", timestampIso: "2026-07-09T12:24:00.000Z", localDate: "2026-07-09", attachmentId: "a1", originalFilename: "20260009.pdf", mimeType: "application/pdf", sizeBytes: 1 };
+  const extraction = { extractionStatus: "text_extracted", extractionMethod: "native_pdf_text", textPath: null, ocrTextPath: null, pageCount: 1, pageTexts: [], ocr: { outputTextPath: null, language: null, quality: null, warnings: [] } } as any;
+  const classify = (filename: string, text: string) => buildClassification({ config, keywordConfig, extraction, text, document: { packagePeriod: "2026-06", source: { ...source, originalFilename: filename }, localPath: "/tmp/" + filename, normalizedFilename: filename, isPdf: true, isImage: false, sha256: filename, sizeBytes: 1, fileExtension: "pdf", unsafeSource: false, unsafeReason: null } });
+  const invoice = classify("20260009.pdf", "F A K T U R A - DANOVY DOKLAD ODBERATEL: EQUISIX S. R. O. ICO: 55 035 523 Den dodania: 7.7.2026 CELKOM K UHRADE: 1231.05 EUR");
+  assert.equal(invoice.finalDecision, "approved_accounting_document");
+  assert.equal(invoice.deliveryDate, "2026-07-07");
+  assert.notEqual(classify("toggl.pdf", "Toggl Track summary report for June").finalDecision, "approved_accounting_document");
+  assert.notEqual(classify("coinomatic.pdf", "Coinomatic delivery report June 8 to July 7").finalDecision, "approved_accounting_document");
 });
 
 test("manifest completeness and preservation of multiple Gmail source references", () => {
