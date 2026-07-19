@@ -203,7 +203,7 @@ function computeDecisionConfidence(input: {
     if (input.invoiceMatchType === "identity_match") return 0.97;
     if (input.invoiceMatchType === "customer_match" || input.invoiceMatchType === "supplier_match") return 0.92;
     if (input.partialNameMatch) return 0.5;
-    return 0.4;
+    return 0.5;
   }
   if (input.isReceipt) {
     if (input.visaMatched) return 0.9;
