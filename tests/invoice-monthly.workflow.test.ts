@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import { buildManifest } from "../src/invoice-monthly/manifest.js";
 import { validatePdfFile } from "../src/invoice-monthly/pdfValidation.js";
 import { createDeterministicZip, validateZipAgainstManifest } from "../src/invoice-monthly/zipPackage.js";
-import { mergeDownloadedAttachments } from "../src/invoice-monthly/gmailDiscovery.js";
+import { discoverPeriodAttachments, mergeDownloadedAttachments } from "../src/invoice-monthly/gmailDiscovery.js";
+import { loadMonthlyConfig } from "../src/invoice-monthly/config.js";
+import { periodFromString } from "../src/invoice-monthly/period.js";
 import { initializeRunState, updateRunState } from "../src/invoice-monthly/runState.js";
 import { runMonthlySecondPass } from "../src/invoice-monthly/secondPass.js";
 import { runInvoiceMonthlyWorkflow } from "../src/invoice-monthly/workflow.js";
@@ -54,6 +56,44 @@ test("SHA-256 duplicate detection across incoming and sent messages", () => {
   assert.equal(merged.uniqueDocuments.length, 1);
   assert.equal(merged.duplicateCount, 1);
   assert.equal(merged.bothDirectionsCount, 1);
+});
+
+test("discovery keeps email keyword provenance but never persists the raw email body", async () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const gmail = {
+    async listMessages() { return { messageIds: ["m1"], nextPageToken: null }; },
+    async getMessage() {
+      return {
+        messageId: "m1", threadId: "t1", internalDateMs: 0, localDate: "2026-06-01", timestampIso: "2026-06-01T00:00:00.000Z",
+        direction: "incoming" as const, mailbox: "hello@equisix.com", from: "sender@example.com", to: [], cc: [], bcc: [], subject: "Hello",
+        bodyText: "Secret note: please find the invoice attached.",
+        attachments: [{ attachmentId: "a1", filename: "document.pdf", mimeType: "application/pdf", sizeBytes: 1 }],
+      };
+    },
+  };
+  const result = await discoverPeriodAttachments({ config, period: periodFromString("2026-06", config.timezone), gmail: gmail as any, query: "has:attachment", direction: "incoming" });
+  assert.equal(result.attachments.length, 1);
+  assert.deepEqual(result.attachments[0].source.emailKeywordDetection?.matchedFields, ["body"]);
+  const serialized = JSON.stringify(result.attachments);
+  assert.equal(serialized.includes("Secret note"), false);
+  assert.equal(serialized.includes("bodyText"), false);
+});
+
+test("discovery excludes unsupported attachments even when the email body has invoice keywords", async () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const gmail = {
+    async listMessages() { return { messageIds: ["m1"], nextPageToken: null }; },
+    async getMessage() {
+      return {
+        messageId: "m1", threadId: "t1", internalDateMs: 0, localDate: "2026-06-01", timestampIso: "2026-06-01T00:00:00.000Z",
+        direction: "incoming" as const, mailbox: "hello@equisix.com", from: "sender@example.com", to: [], cc: [], bcc: [], subject: "Hello",
+        bodyText: "Invoice attached.",
+        attachments: [{ attachmentId: "a1", filename: "notes.txt", mimeType: "text/plain", sizeBytes: 1 }],
+      };
+    },
+  };
+  const result = await discoverPeriodAttachments({ config, period: periodFromString("2026-06", config.timezone), gmail: gmail as any, query: "has:attachment", direction: "incoming" });
+  assert.equal(result.attachments.length, 0);
 });
 
 test("manifest completeness and preservation of multiple Gmail source references", () => {
@@ -227,6 +267,7 @@ test("monthly email idempotency and no real email during prepare-only workflow",
           cc: [],
           bcc: [],
           subject: messageId === "i1" ? "Faktúra 1" : "Sent invoice",
+          bodyText: messageId === "i1" ? "V prílohe posielam faktúru." : "Please find the invoice attached.",
           attachments: [{ attachmentId: `a-${messageId}`, filename: messageId === "i1" ? "faktura.pdf" : "invoice.pdf", mimeType: "application/pdf", sizeBytes: 100, partPath: "0" }],
         };
       },

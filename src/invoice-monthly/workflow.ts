@@ -479,6 +479,12 @@ export async function runInvoiceMonthlyWorkflow(projectRoot: string, services: I
       sourceMailboxes: [...new Set(document.sourceMessages.map((source) => source.mailbox))],
       deduplicated: document.sourceMessages.length > 1,
       finalDecision: document.finalDecision ?? null,
+      keyword_found: document.keywordDetection?.keywordFound ?? false,
+      keyword_source: document.keywordDetection?.keywordSource ?? "none",
+      keyword_fields: document.keywordDetection?.matchedFields ?? [],
+      keyword_matched: document.keywordDetection?.matchedKeywords ?? [],
+      keyword_from_ocr: document.keywordDetection?.fromOcr ?? false,
+      keyword_from_email_text: document.keywordDetection?.fromEmailText ?? false,
     });
   }
   writeJsonAtomic(classifiedPath, classified, 0o600);

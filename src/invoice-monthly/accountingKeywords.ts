@@ -2,8 +2,94 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import { KeywordAnalysis, KeywordConfig, NegativeMatch, KeywordMatch, SignalMatch } from "./types.js";
+import { InvoiceKeywordDetection, KeywordAnalysis, KeywordConfig, KeywordDetectionField, KeywordDetectionSource, NegativeMatch, KeywordMatch, SignalMatch } from "./types.js";
 import { escapeRegex, normalizeForMatching, tokenizeFilename } from "./textNormalization.js";
+
+// Partial-match stems, case-insensitive, diacritics already stripped by normalizeForMatching.
+// "faktur" catches faktura/faktúra/faktury; "invoic" catches invoice/invoices/invoicing.
+const INVOICE_KEYWORD_STEMS = [
+  "faktur",
+  "invoic",
+  "receipt",
+  "blok",
+  "doklad",
+  "payment confirmation",
+];
+const KEYWORD_DETECTION_FIELDS: KeywordDetectionField[] = ["subject", "body", "attachment_name", "attachment_text", "ocr"];
+
+/**
+ * Detects invoice-related keywords across the email subject, body, and attachment text.
+ * This is a SIGNAL ONLY — it never filters documents. Uses partial (substring) matching on
+ * diacritics-normalized, lowercased text so "faktúra" and "faktura" both match "faktur".
+ */
+export function detectInvoiceKeywords(input: {
+  subject: string;
+  body: string;
+  attachmentName: string;
+  attachmentText: string;
+  attachmentFromOcr: boolean;
+}): InvoiceKeywordDetection {
+  const attachmentTextField: KeywordDetectionField = input.attachmentFromOcr ? "ocr" : "attachment_text";
+  const sources: Array<{ name: KeywordDetectionField; value: string }> = [
+    { name: "subject", value: normalizeForMatching(input.subject) },
+    { name: "body", value: normalizeForMatching(input.body) },
+    { name: "attachment_name", value: normalizeForMatching(input.attachmentName) },
+    { name: attachmentTextField, value: normalizeForMatching(input.attachmentText) },
+  ];
+
+  const matchedKeywords = new Set<string>();
+  const matchedFields = new Set<KeywordDetectionField>();
+
+  for (const source of sources) {
+    if (!source.value) continue;
+    for (const stem of INVOICE_KEYWORD_STEMS) {
+      const normalizedStem = normalizeForMatching(stem);
+      if (normalizedStem && source.value.includes(normalizedStem)) {
+        matchedKeywords.add(stem);
+        matchedFields.add(source.name);
+      }
+    }
+  }
+
+  const orderedFields = KEYWORD_DETECTION_FIELDS.filter(
+    (name) => matchedFields.has(name),
+  );
+
+  let keywordSource: KeywordDetectionSource;
+  if (orderedFields.length === 0) keywordSource = "none";
+  else if (orderedFields.length > 1) keywordSource = "multiple";
+  else keywordSource = orderedFields[0];
+
+  return {
+    keywordFound: orderedFields.length > 0,
+    keywordSource,
+    matchedKeywords: [...matchedKeywords],
+    matchedFields: orderedFields,
+    fromOcr: matchedFields.has("ocr"),
+    fromEmailText: matchedFields.has("subject") || matchedFields.has("body"),
+  };
+}
+
+export function mergeInvoiceKeywordDetections(...detections: Array<InvoiceKeywordDetection | undefined>): InvoiceKeywordDetection {
+  const matchedKeywords = new Set<string>();
+  const matchedFields = new Set<KeywordDetectionField>();
+  for (const detection of detections) {
+    if (!detection) continue;
+    detection.matchedKeywords.forEach((keyword) => matchedKeywords.add(keyword));
+    detection.matchedFields.forEach((field) => matchedFields.add(field));
+  }
+  const orderedFields = KEYWORD_DETECTION_FIELDS.filter(
+    (field) => matchedFields.has(field),
+  );
+  return {
+    keywordFound: orderedFields.length > 0,
+    keywordSource: orderedFields.length === 0 ? "none" : orderedFields.length === 1 ? orderedFields[0] : "multiple",
+    matchedKeywords: [...matchedKeywords],
+    matchedFields: orderedFields,
+    fromOcr: matchedFields.has("ocr"),
+    fromEmailText: matchedFields.has("subject") || matchedFields.has("body"),
+  };
+}
 
 const KeywordFileSchema = z.object({
   positive_keywords: z.record(z.array(z.string().min(1)).min(1)),

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { analyzeKeywords, keywordCounts, loadKeywordConfig } from "../src/invoice-monthly/accountingKeywords.js";
+import { analyzeKeywords, detectInvoiceKeywords, keywordCounts, loadKeywordConfig } from "../src/invoice-monthly/accountingKeywords.js";
 import { classifyBySignals } from "../src/invoice-monthly/accountingSignals.js";
 import { buildStoredFilename, ensureUniqueStoredFilenames } from "../src/invoice-monthly/filename.js";
 import { normalizeForMatching } from "../src/invoice-monthly/textNormalization.js";
@@ -96,6 +96,55 @@ test("scanned candidate inclusion as unverified", () => {
   const analysis = analyzeKeywords({ subject: "faktúra", filename: "", text: "" }, keywordConfig);
   const classification = classifyBySignals({ keywordAnalysis: analysis, extractionStatus: "needs_ocr", localTextAvailable: false });
   assert.equal(classification.approvalStatus, "auto_approved_unverified");
+});
+
+test("invoice keyword detection: diacritic keyword only in subject", () => {
+  const result = detectInvoiceKeywords({ subject: "Faktúra 2026-06", body: "", attachmentName: "", attachmentText: "", attachmentFromOcr: false });
+  assert.equal(result.keywordFound, true);
+  assert.equal(result.keywordSource, "subject");
+  assert.ok(result.matchedKeywords.includes("faktur"));
+  assert.equal(result.fromEmailText, true);
+  assert.equal(result.fromOcr, false);
+});
+
+test("invoice keyword detection: keyword only in email body", () => {
+  const result = detectInvoiceKeywords({ subject: "Hello", body: "Please find the invoice attached", attachmentName: "", attachmentText: "", attachmentFromOcr: false });
+  assert.equal(result.keywordFound, true);
+  assert.equal(result.keywordSource, "body");
+  assert.ok(result.matchedKeywords.includes("invoic"));
+});
+
+test("invoice keyword detection: keyword only inside attachment via OCR", () => {
+  const result = detectInvoiceKeywords({ subject: "Hello", body: "no signal here", attachmentName: "", attachmentText: "DAŇOVÝ DOKLAD č. 5", attachmentFromOcr: true });
+  assert.equal(result.keywordFound, true);
+  assert.equal(result.keywordSource, "ocr");
+  assert.equal(result.fromOcr, true);
+  assert.equal(result.fromEmailText, false);
+});
+
+test("invoice keyword detection: multiple sources", () => {
+  const result = detectInvoiceKeywords({ subject: "Faktúra", body: "receipt enclosed", attachmentName: "", attachmentText: "", attachmentFromOcr: false });
+  assert.equal(result.keywordSource, "multiple");
+  assert.deepEqual(result.matchedFields, ["subject", "body"]);
+});
+
+test("invoice keyword detection: no keyword found", () => {
+  const result = detectInvoiceKeywords({ subject: "Meeting notes", body: "See you tomorrow", attachmentName: "agenda.pdf", attachmentText: "agenda", attachmentFromOcr: false });
+  assert.equal(result.keywordFound, false);
+  assert.equal(result.keywordSource, "none");
+  assert.deepEqual(result.matchedKeywords, []);
+});
+
+test("invoice keyword detection: partial match on inflected forms", () => {
+  const result = detectInvoiceKeywords({ subject: "Zaslanie faktúry a invoicing", body: "", attachmentName: "", attachmentText: "", attachmentFromOcr: false });
+  assert.ok(result.matchedKeywords.includes("faktur"));
+  assert.ok(result.matchedKeywords.includes("invoic"));
+});
+
+test("invoice keyword detection: attachment filename provenance", () => {
+  const result = detectInvoiceKeywords({ subject: "", body: "", attachmentName: "invoice-2026.pdf", attachmentText: "", attachmentFromOcr: false });
+  assert.equal(result.keywordSource, "attachment_name");
+  assert.deepEqual(result.matchedFields, ["attachment_name"]);
 });
 
 test("filename sanitization", () => {

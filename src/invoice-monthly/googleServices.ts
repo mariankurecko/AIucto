@@ -49,6 +49,44 @@ function decodeBase64Url(data: string): Buffer {
   return Buffer.from(normalized + "=".repeat(padding === 0 ? 0 : 4 - padding), "base64");
 }
 
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#\d+;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Walks the MIME tree collecting the plain-text body and the HTML body (stripped to text).
+export function extractGmailBodyText(part: gmail_v1.Schema$MessagePart | undefined): string {
+  if (!part) return "";
+  const plain: string[] = [];
+  const html: string[] = [];
+
+  const walk = (node: gmail_v1.Schema$MessagePart | undefined) => {
+    if (!node) return;
+    const mimeType = node.mimeType?.toLowerCase() || "";
+    const data = node.body?.data;
+    if (data && !node.body?.attachmentId) {
+      const decoded = decodeBase64Url(data).toString("utf8");
+      if (mimeType === "text/plain") plain.push(decoded);
+      else if (mimeType === "text/html") html.push(stripHtml(decoded));
+    }
+    for (const child of node.parts ?? []) walk(child);
+  };
+  walk(part);
+
+  // Prefer plain text; fall back to normalized HTML when no plain part exists.
+  const combined = [...plain, ...html].join(" ").replace(/\s+/g, " ").trim();
+  return combined;
+}
+
 function escapeDrive(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
@@ -100,6 +138,7 @@ export function createGmailReadService(config: MonthlyWorkflowConfig): GmailRead
         cc: parseRecipients(headerValue(headers, "Cc")),
         bcc: parseRecipients(headerValue(headers, "Bcc")),
         subject: headerValue(headers, "Subject"),
+        bodyText: extractGmailBodyText(data.payload),
         attachments: collectAttachments(data.payload),
       };
     },

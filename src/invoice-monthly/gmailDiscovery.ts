@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { analyzeKeywords } from "./accountingKeywords.js";
+import { analyzeKeywords, detectInvoiceKeywords } from "./accountingKeywords.js";
 import { matchEquisixIdentity } from "./companyIdentity.js";
 import { buildClassification as buildClassificationEngine } from "../../packages/classification/src/index.js";
 import { extractDocumentText } from "./pdfExtraction.js";
@@ -561,6 +561,13 @@ export async function discoverPeriodAttachments(params: {
             from: message.from,
             recipients: [...message.to, ...message.cc, ...message.bcc],
             subject: message.subject,
+            emailKeywordDetection: detectInvoiceKeywords({
+              subject: message.subject,
+              body: message.bodyText ?? "",
+              attachmentName: "",
+              attachmentText: "",
+              attachmentFromOcr: false,
+            }),
             timestampIso: message.timestampIso,
             localDate: message.localDate,
             attachmentId: attachment.attachmentId,

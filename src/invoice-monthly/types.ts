@@ -307,6 +307,7 @@ export type GmailSourceMessage = {
   cc: string[];
   bcc: string[];
   subject: string;
+  bodyText?: string;
   attachments: GmailAttachmentRef[];
 };
 
@@ -318,6 +319,8 @@ export type AttachmentSourceRef = {
   from: string;
   recipients: string[];
   subject: string;
+  // Derived while discovering Gmail messages; raw body text is never persisted.
+  emailKeywordDetection?: InvoiceKeywordDetection;
   timestampIso: string;
   localDate: string;
   attachmentId: string;
@@ -364,6 +367,20 @@ export type KeywordAnalysis = {
   matchedAccountingKeywords: KeywordMatch[];
   matchedSupportingSignals: SignalMatch[];
   matchedNegativeSignals: NegativeMatch[];
+};
+
+export type KeywordDetectionField = "subject" | "body" | "attachment_name" | "attachment_text" | "ocr";
+export type KeywordDetectionSource = KeywordDetectionField | "multiple" | "none";
+
+export type InvoiceKeywordDetection = {
+  keywordFound: boolean;
+  keywordSource: KeywordDetectionSource;
+  matchedKeywords: string[];
+  matchedFields: KeywordDetectionField[];
+  // true when at least one keyword hit came from OCR-extracted attachment text
+  fromOcr: boolean;
+  // true when at least one keyword hit came from the email itself (subject or body)
+  fromEmailText: boolean;
 };
 
 export type OcrResult = {
@@ -475,6 +492,7 @@ export type ClassifiedDocument = {
   ocrTextPath?: string | null;
   pageCount?: number | null;
   keywordAnalysis: KeywordAnalysis;
+  keywordDetection?: InvoiceKeywordDetection;
   localAccountingScore: number;
   localSignals: string[];
   localDecisionReason: string;

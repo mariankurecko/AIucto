@@ -1,4 +1,4 @@
-import { analyzeKeywords } from "../../../src/invoice-monthly/accountingKeywords.js";
+import { analyzeKeywords, detectInvoiceKeywords, mergeInvoiceKeywordDetections } from "../../../src/invoice-monthly/accountingKeywords.js";
 import { matchEquisixIdentity } from "../../../src/invoice-monthly/companyIdentity.js";
 import { normalizeCompact, normalizeForMatching } from "../../../src/invoice-monthly/textNormalization.js";
 import {
@@ -292,6 +292,15 @@ export function buildClassification(params: {
     text: params.text,
   }, params.keywordConfig);
 
+
+  // Email provenance is reduced during discovery; only fields and categories persist.
+  const keywordDetection = mergeInvoiceKeywordDetections(params.document.source.emailKeywordDetection, detectInvoiceKeywords({
+    subject: "",
+    body: "",
+    attachmentName: params.document.source.originalFilename,
+    attachmentText: params.text,
+    attachmentFromOcr: Boolean(params.extraction.ocr.outputTextPath),
+  }));
   const identity = params.config.companyIdentity ?? {
     legalName: "Equisix s.r.o.",
     knownNames: ["Equisix s.r.o.", "Equisix"],
@@ -458,6 +467,7 @@ export function buildClassification(params: {
     pageCount: params.extraction.pageCount,
     keywordAnalysis,
     localAccountingScore: keywordAnalysis.matchedAccountingKeywords.length * 10 - keywordAnalysis.matchedNegativeSignals.length * 15,
+    keywordDetection,
     localSignals: [
       ...keywordAnalysis.matchedAccountingKeywords.map((match) => `positive:${match.keyword}:${match.field}`),
       ...keywordAnalysis.matchedNegativeSignals.map((match) => `negative:${match.keyword}:${match.field}`),
