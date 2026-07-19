@@ -12,6 +12,7 @@ const INVOICE_KEYWORD_STEMS = [
   "invoic",
   "receipt",
   "blok",
+  "block",
   "doklad",
   "payment confirmation",
 ];

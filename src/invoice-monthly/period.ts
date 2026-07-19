@@ -107,9 +107,10 @@ export function isInternalDateInPeriod(
   return localDate >= period.startDate && localDate < period.endExclusiveDate;
 }
 
-// Attachment-type filter shared by discovery queries. Matches every type the
-// pipeline can process (PDF + common image formats) so image-only invoices are
-// not dropped at the Gmail search layer. Keywords remain signal-only.
+// Match every attachment type the pipeline can actually process. Restricting to
+// `filename:pdf` silently dropped image-only invoices (e.g. a "faktura" sent as a
+// PNG/JPG photo) at the Gmail search layer, before classification could see them.
+// Keywords remain signal-only — discovery is by attachment type, never keyword.
 const ATTACHMENT_FILENAME_FILTER = "(filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp OR filename:heic OR filename:heif)";
 
 export function buildIncomingQuery(period: PeriodInfo, nextMonthScanDays = 15): string {
@@ -118,7 +119,7 @@ export function buildIncomingQuery(period: PeriodInfo, nextMonthScanDays = 15): 
     `after:${period.queryAfter}`,
     `before:${scanBefore.replace(/-/g, "/")}`,
     "has:attachment",
-    "filename:pdf",
+    ATTACHMENT_FILENAME_FILTER,
     "-in:sent",
     "-in:spam",
     "-in:trash",
@@ -132,7 +133,7 @@ export function buildSentQuery(period: PeriodInfo, nextMonthScanDays = 15): stri
     `after:${period.queryAfter}`,
     `before:${scanBefore.replace(/-/g, "/")}`,
     "has:attachment",
-    "filename:pdf",
+    ATTACHMENT_FILENAME_FILTER,
     "-in:spam",
     "-in:trash",
   ].join(" ");

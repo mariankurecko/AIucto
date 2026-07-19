@@ -98,6 +98,18 @@ test("discovery excludes unsupported attachments even when the email body has in
   assert.equal(result.attachments.length, 0);
 });
 
+test("discovery keeps two Blocky receipt image attachments with subject keyword provenance", async () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const gmail = {
+    async listMessages() { return { messageIds: ["blocky-jun"], nextPageToken: null }; },
+    async getMessage() { return { messageId: "blocky-jun", threadId: "blocky-jun", internalDateMs: 0, localDate: "2026-07-16", timestampIso: "2026-07-16T15:04:45.000Z", direction: "incoming" as const, mailbox: "hello@equisix.com", from: "kurecko@gmail.com", to: [], cc: [], bcc: [], subject: "Fwd: Blocky jun", bodyText: "Preposielam bločky z júna.", attachments: [{ attachmentId: "a1", filename: "IMG_9262.jpeg", mimeType: "image/jpeg", sizeBytes: 6063503 }, { attachmentId: "a2", filename: "IMG_9261.jpeg", mimeType: "image/jpeg", sizeBytes: 5574777 }] }; },
+  };
+  const result = await discoverPeriodAttachments({ config, period: periodFromString("2026-06", config.timezone), gmail: gmail as any, query: "has:attachment filename:jpeg", direction: "incoming" });
+  assert.equal(result.attachments.length, 2);
+  assert.equal(result.attachments.every((attachment) => attachment.source.emailKeywordDetection?.keywordFound), true);
+  assert.equal(JSON.stringify(result.attachments).includes("Preposielam bločky"), false);
+});
+
 test("OCR-spaced invoice heading classifies an invoice independently of report attachments", () => {
   const config = loadMonthlyConfig(process.cwd(), "equisix");
   const keywordConfig = loadKeywordConfig(process.cwd(), "config/accounting-keywords.yaml");

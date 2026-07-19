@@ -44,17 +44,19 @@ test("formatInternalDateToLocalDate returns Bratislava local date", () => {
   assert.match(formatted.timestampIso, /^2026-06-15T10:30:00.000Z$/);
 });
 
+const ATTACHMENT_FILTER = "(filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp OR filename:heic OR filename:heif)";
+
 test("incoming Gmail query includes read-only incoming constraints", () => {
   const query = buildIncomingQuery(periodFromString("2026-06", "Europe/Bratislava"));
-  assert.equal(query, "after:2026/06/01 before:2026/07/16 has:attachment filename:pdf -in:sent -in:spam -in:trash");
+  assert.equal(query, `after:2026/06/01 before:2026/07/16 has:attachment ${ATTACHMENT_FILTER} -in:sent -in:spam -in:trash`);
 });
 
 test("sent Gmail query includes Sent Mail constraint", () => {
   const query = buildSentQuery(periodFromString("2026-06", "Europe/Bratislava"));
-  assert.equal(query, "in:sent after:2026/06/01 before:2026/07/16 has:attachment filename:pdf -in:spam -in:trash");
+  assert.equal(query, `in:sent after:2026/06/01 before:2026/07/16 has:attachment ${ATTACHMENT_FILTER} -in:spam -in:trash`);
 });
 
 test("query window uses configurable next month scan days", () => {
   const query = buildIncomingQuery(periodFromString("2026-06", "Europe/Bratislava"), 5);
-  assert.equal(query, "after:2026/06/01 before:2026/07/06 has:attachment filename:pdf -in:sent -in:spam -in:trash");
+  assert.equal(query, `after:2026/06/01 before:2026/07/06 has:attachment ${ATTACHMENT_FILTER} -in:sent -in:spam -in:trash`);
 });
