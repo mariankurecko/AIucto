@@ -199,6 +199,7 @@ async function runDriveReconciliation(params: {
     throw new Error(`--reconcile-drive requires an existing run: classified.json not found at ${classifiedPath}. Run the monthly pipeline first.`);
   }
   const classified = readJsonFile<ClassifiedDocument[]>(classifiedPath);
+  const approved = classified.filter((document) => document.finalDecision === "approved_accounting_document");
 
   const driveAuthorizedEmail = await services.drive.getAuthorizedEmail();
   uploadLog("invoice.reconcile.started", {
@@ -208,8 +209,28 @@ async function runDriveReconciliation(params: {
     driveAuthorizedEmail,
     period: period.period,
     totalDocuments: classified.length,
-    approvedDocuments: classified.filter((document) => document.finalDecision === "approved_accounting_document").length,
+    approvedDocuments: approved.length,
   });
+
+  if (approved.length === 0) {
+    writeClassifiedOutputs(params.runDirectory, classified);
+    updateRunState(params.statePath, params.currentState, { stage: "completed" });
+    return {
+      status: "reconciled",
+      output: {
+        period: period.period,
+        mode: "reconcile_drive",
+        total_documents: classified.length,
+        approved_documents: 0,
+        uploaded_now: 0,
+        already_present: 0,
+        missing_after_run: 0,
+        failed: 0,
+        quota_deferred: 0,
+        audit: { accountId: config.accountId, period: period.period, total_results: classified.length, total_approved: 0, total_present_in_drive: 0, missing_in_drive: [], extra_in_drive: [] },
+      },
+    };
+  }
 
   const folderTree = await services.drive.ensureMonthlyFolder(config, period);
   const summary = await syncApprovedDocumentsToDrive({

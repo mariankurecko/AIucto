@@ -13,8 +13,9 @@ import { periodFromString } from "../src/invoice-monthly/period.js";
 import { initializeRunState, updateRunState } from "../src/invoice-monthly/runState.js";
 import { runMonthlySecondPass } from "../src/invoice-monthly/secondPass.js";
 import { runInvoiceMonthlyWorkflow } from "../src/invoice-monthly/workflow.js";
+import { compareResultsWithDrive, syncApprovedDocumentsToDrive } from "../src/invoice-monthly/driveSync.js";
 import { buildClassification } from "../packages/classification/src/index.js";
-import { InvoiceMonthlyServices } from "../src/invoice-monthly/types.js";
+import { DriveFolderTree, InvoiceMonthlyServices } from "../src/invoice-monthly/types.js";
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "invoice-monthly-test-"));
@@ -58,6 +59,95 @@ test("SHA-256 duplicate detection across incoming and sent messages", () => {
   assert.equal(merged.uniqueDocuments.length, 1);
   assert.equal(merged.duplicateCount, 1);
   assert.equal(merged.bothDirectionsCount, 1);
+});
+
+test("Drive sync does not create an Approved Documents folder without approved documents", async () => {
+  let childFolderCalls = 0;
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const summary = await syncApprovedDocumentsToDrive({
+    config,
+    services: {
+      gmailRead: {} as any,
+      sheets: {} as any,
+      openrouter: {} as any,
+      gmailSend: null,
+      drive: {
+        async getAuthorizedEmail() { return "hello@equisix.com"; },
+        async ensureMonthlyFolder() { throw new Error("not used"); },
+        async ensureChildFolder() { childFolderCalls += 1; throw new Error("not used"); },
+        async findFileByAppProperties() { return null; },
+        async uploadOrReplaceJson() { throw new Error("not used"); },
+        async uploadOrReplaceBinary() { throw new Error("not used"); },
+      },
+    },
+    folderTree: {
+      accountRoot: { id: "root", name: "root", mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] },
+      accounting: { id: "accounting", name: "Accounting", mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] },
+      invoices: { id: "invoices", name: "Invoices", mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] },
+      year: { id: "year", name: "2026", mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] },
+      month: { id: "month", name: "06", mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] },
+    },
+    runId: "run-1",
+    period: "2026-06",
+    documents: [{ finalDecision: "review_required" } as any],
+    mode: "run",
+  });
+  assert.equal(summary.approved_documents, 0);
+  assert.equal(childFolderCalls, 0);
+});
+
+test("Drive sync ensures Approved Documents only for accounting periods with approved documents", async () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const ensuredParents: string[] = [];
+  const folder = (id: string, name = id) => ({ id, name, mimeType: "application/vnd.google-apps.folder", webViewLink: null, appProperties: {}, parents: [] });
+  const tree = (month: string): DriveFolderTree => ({ accountRoot: folder("root"), accounting: folder("accounting"), invoices: folder("invoices"), year: folder(`year-${month}`), month: folder(`month-${month}`, month) });
+  const drive = {
+    async ensureChildFolder(name: string, parentId: string) {
+      assert.equal(name, "Approved Documents");
+      ensuredParents.push(parentId);
+      return folder(`approved-${parentId}`, name);
+    },
+    async ensureFileInFolder() { return { created: true, file: { id: "file", name: "invoice.pdf", mimeType: "application/pdf", webViewLink: null, appProperties: {}, parents: [] } }; },
+  };
+  const approved = (sha256: string) => ({
+    sha256,
+    localPath: `/tmp/${sha256}.pdf`,
+    originalFilename: `${sha256}.pdf`,
+    storedFilename: `${sha256}.pdf`,
+    mimeType: "application/pdf",
+    sourceMessages: [],
+    finalDecision: "approved_accounting_document",
+    documentType: "invoice",
+  } as any);
+
+  const mayTree = tree("05");
+  const juneTree = tree("06");
+  for (const [period, folderTree, document] of [["2026-05", mayTree, approved("may")], ["2026-06", juneTree, approved("june")]] as const) {
+    await syncApprovedDocumentsToDrive({ config, services: { drive } as any, folderTree, runId: "run-1", period, documents: [document], mode: "run" });
+  }
+
+  assert.deepEqual(ensuredParents, ["month-05", "month-06"]);
+  assert.equal(mayTree.approved?.id, "approved-month-05");
+  assert.equal(juneTree.approved?.id, "approved-month-06");
+});
+
+test("Drive report-only reconciliation does not create folders when no documents are approved", async () => {
+  const config = loadMonthlyConfig(process.cwd(), "equisix");
+  const projectRoot = tempDir();
+  const runDirectory = path.join(projectRoot, "data", "invoice-runs", config.accountId, "monthly", "2026-06");
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.writeFileSync(path.join(runDirectory, "classified.json"), JSON.stringify([{ finalDecision: "review_required" }]));
+  let ensureMonthlyFolderCalls = 0;
+  const report = await compareResultsWithDrive({
+    config,
+    services: { drive: {
+      async ensureMonthlyFolder() { ensureMonthlyFolderCalls += 1; throw new Error("must not create folders"); },
+    } } as any,
+    period: periodFromString("2026-06", config.timezone),
+    projectRoot,
+  });
+  assert.equal(ensureMonthlyFolderCalls, 0);
+  assert.equal(report.total_approved, 0);
 });
 
 test("discovery keeps email keyword provenance but never persists the raw email body", async () => {

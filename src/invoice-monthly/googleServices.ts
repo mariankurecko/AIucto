@@ -198,11 +198,9 @@ export function createDriveService(config: MonthlyWorkflowConfig): DriveService 
       const invoices = await ensureFolder(monthlyConfig.driveInvoicesFolder, accounting.id, { ...accountingAppProperties, resourceRole: "invoices_folder" });
       const year = await ensureFolder(String(period.year), invoices.id, { ...accountingAppProperties, resourceRole: "year_folder", packagePeriod: period.period });
       const month = await ensureFolder(String(period.month).padStart(2, "0"), year.id, { ...accountingAppProperties, resourceRole: "month_folder", packagePeriod: period.period });
-      const approved = await ensureFolder("Approved Documents", month.id, { ...accountingAppProperties, resourceRole: "approved_documents", packagePeriod: period.period });
-      const review = await ensureFolder("Review Required", month.id, { ...accountingAppProperties, resourceRole: "review_required", packagePeriod: period.period });
-      const rejected = await ensureFolder("Rejected Documents", month.id, { ...accountingAppProperties, resourceRole: "rejected_documents", packagePeriod: period.period });
-      const previousRunUnverified = await ensureFolder("Previous Run - Unverified", month.id, { ...accountingAppProperties, resourceRole: "previous_run_unverified", packagePeriod: period.period });
-      return { accountRoot, accounting, invoices, year, month, approved, review, rejected, previousRunUnverified } satisfies DriveFolderTree;
+      // Leaf folders are created by the workflow that actually needs them. In
+      // particular, Approved Documents must not exist for an empty month.
+      return { accountRoot, accounting, invoices, year, month } satisfies DriveFolderTree;
     },
     async ensureChildFolder(name, parentId, appProperties) {
       return ensureFolder(name, parentId, appProperties);

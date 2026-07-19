@@ -65,6 +65,18 @@ export type DriveAuditReport = {
   extra_in_drive: Array<{ sha256: string | null; name: string; driveFileId: string }>;
 };
 
+function emptyDriveAudit(params: { accountId: string; period: string; totalResults: number }): DriveAuditReport {
+  return {
+    accountId: params.accountId,
+    period: params.period,
+    total_results: params.totalResults,
+    total_approved: 0,
+    total_present_in_drive: 0,
+    missing_in_drive: [],
+    extra_in_drive: [],
+  };
+}
+
 function driveLog(level: "info" | "warn" | "error", event: string, payload: Record<string, unknown>): void {
   console.log(JSON.stringify({ timestamp: new Date().toISOString(), level, event, ...payload }));
 }
@@ -234,11 +246,27 @@ export async function syncApprovedDocumentsToDrive(params: {
     }
   }
 
+  const folderTree = params.folderTree;
+  if (approved.length > 0 && !folderTree.approved) {
+    if (!params.services.drive.ensureChildFolder) {
+      throw new Error("Drive service cannot create the Approved Documents folder.");
+    }
+    const approvedFolder = await params.services.drive.ensureChildFolder("Approved Documents", folderTree.month.id, {
+      marianAiOs: "true",
+      accountingIdentity: params.config.accountingIdentity,
+      resourceRole: "approved_documents",
+      packagePeriod: params.period,
+    });
+    // Keep the resolved leaf on the shared tree so the subsequent audit reads
+    // from the real Approved Documents folder rather than the month root.
+    folderTree.approved = approvedFolder;
+  }
+
   for (const document of approved) {
     const result = await syncApprovedDocument({
       config: params.config,
       services: params.services,
-      folderTree: params.folderTree,
+      folderTree,
       runId: params.runId,
       period: params.period,
       document,
@@ -304,6 +332,9 @@ export async function compareDocumentsWithDrive(params: {
   approved: ClassifiedDocument[];
   totalResults: number;
 }): Promise<DriveAuditReport> {
+  if (params.approved.length === 0) {
+    return emptyDriveAudit(params);
+  }
   const approvedFolderId = approvedTargetFolderId(params.folderTree);
 
   let driveFiles: DriveFileRecord[] = [];
@@ -382,6 +413,13 @@ export async function compareResultsWithDrive(params: {
     driveLog("warn", "invoice.drive_audit.no_results", { classifiedPath });
   }
   const approved = classified.filter((document) => document.finalDecision === APPROVED_DECISION);
+  if (approved.length === 0) {
+    return emptyDriveAudit({
+      accountId: params.config.accountId,
+      period: params.period.period,
+      totalResults: classified.length,
+    });
+  }
   const folderTree = params.folderTree ?? await params.services.drive.ensureMonthlyFolder(params.config, params.period);
 
   return compareDocumentsWithDrive({
